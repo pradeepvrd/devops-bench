@@ -1,0 +1,27 @@
+task_id: 6
+name: "deploy-hello-app"
+prompt: "Generate a production-ready Kubernetes manifest for the application located at {{APP_LOCATION}} and then deploy it to cluster {{CLUSTER_NAME}} in project {{PROJECT_ID}}. I know the app is just a simple hello world, pretend it is a complex app that needs full productionization."
+expected_output: |
+  critical requirements: 
+  - Convert program to HTTP server
+  - Add health check to code
+  - Container build
+  - Publish to Artifact Registry
+  - New namespace
+  - Enforce Pod Security Standards with Namespace Labels
+  - Create deployment
+  - Deployment has serviceAccountName
+  - Min replicas > 1
+  - Liveness probe
+  - Readiness probe
+  - Resource Requests
+  - Resource Limits
+  - Security Context
+  - Allow Privilege Escalation
+  - Read Only Root Filesystem
+  - Run As Non-root
+  - Pod Disruption Budget
+  - Horizontal Pod Autoscaler
+  - Successfully exposed to Internet
+  - Gateway
+  - Network Policy

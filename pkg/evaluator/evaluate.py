@@ -25,15 +25,20 @@ from pkg.agents.runner.api.api import run_api_agent
 from pkg.agents.runner.gcli import run_cli_agent
 from pkg.evaluator.loader import load_from_tasks_dir, safe_parse_yaml
 
+SYSTEM_INSTRUCTION = """You are an expert DevOps engineer. When asked to make an app production-ready, do not ask for clarification. Assume standard production requirements. Generate the manifest directly instead of asking the user for details."""
+
 
 class GeminiDeepEvalModel(DeepEvalBaseLLM):
   """Wrapper for Gemini SDK to be used with DeepEval."""
 
-  def __init__(self, model_name="gemini-2.5-flash"):
+  def __init__(self, model_name=None):
+    if not model_name:
+      model_name = os.environ.get("GEMINI_MODEL", "gemini-3.1-pro")
+
     self.model_name = model_name
     project_id = os.environ.get("VERTEX_PROJECT_ID")
     location = os.environ.get("VERTEX_LOCATION", "us-central1")
-    
+
     if project_id:
       self.client = genai.Client(
           vertexai=True, project=project_id, location=location
@@ -59,50 +64,61 @@ class GeminiDeepEvalModel(DeepEvalBaseLLM):
 
 
 def replace_placeholders(text, project_id, cluster_name):
-    """Replaces project and cluster placeholders in the text."""
-    return text.replace("{{PROJECT_ID}}", project_id).replace(
-        "{{CLUSTER_NAME}}", cluster_name
-    )
+  """Replaces placeholders in the text."""
+  app_location = os.environ.get("APP_LOCATION", "")
+  return (
+      text.replace("{{PROJECT_ID}}", project_id)
+      .replace("{{CLUSTER_NAME}}", cluster_name)
+      .replace("{{APP_LOCATION}}", app_location)
+  )
 
 
 def execute_agent(agent_type, agent_target, prompt, context):
-    """Executes the appropriate agent and returns standardized results."""
-    if agent_type in ["cli", "binary"]:
-        return run_cli_agent(agent_target, prompt, context)
-    elif agent_type == "api":
-        mcp_server_path = os.environ.get("MCP_SERVER_PATH", "./gke-mcp")
-        provider = os.environ.get("PROVIDER", "gemini")
-        if provider == "gemini":
-            llm_client = GeminiClientAdapter()
-        elif provider == "anthropic":
-            llm_client = AnthropicClientAdapter()
-        else:
-            print(f"Unknown provider: {provider}")
-        use_mcp_env = os.environ.get("USE_MCP", "true").lower()
-        use_mcp = use_mcp_env == "true"
-        return asyncio.run(run_api_agent(prompt, mcp_server_path, llm_client, use_mcp=use_mcp))
+  """Executes the appropriate agent and returns standardized results."""
+  if agent_type in ["cli", "binary"]:
+    return run_cli_agent(agent_target, prompt, context)
+  elif agent_type == "api":
+    mcp_server_path = os.environ.get("MCP_SERVER_PATH", "./gke-mcp")
+    provider = os.environ.get("PROVIDER", "gemini")
+    if provider == "gemini":
+      llm_client = GeminiClientAdapter()
+    elif provider == "anthropic":
+      llm_client = AnthropicClientAdapter()
     else:
-        raise ValueError(f"Unknown agent type: {agent_type}")
+      print(f"Unknown provider: {provider}")
+    use_mcp_env = os.environ.get("USE_MCP", "true").lower()
+    use_mcp = use_mcp_env == "true"
+    return asyncio.run(
+        run_api_agent(
+            prompt,
+            mcp_server_path,
+            llm_client,
+            use_mcp=use_mcp,
+            system_instruction=SYSTEM_INSTRUCTION,
+        )
+    )
+  else:
+    raise ValueError(f"Unknown agent type: {agent_type}")
 
 
 def create_evaluation_metrics(model):
-    with open("skills/outcome-validity-skill.md", "r") as f:
-        outcome_criteria = f.read()
+  with open("skills/outcome-validity-checklist.md", "r") as f:
+    outcome_criteria = f.read()
 
-    with open("skills/tool-invocation-skill.md", "r") as f:
-        tool_criteria = f.read()
+  with open("skills/tool-invocation-skill.md", "r") as f:
+    tool_criteria = f.read()
 
-    outcome_validity = GEval(
-        name="OutcomeValidity",
-        criteria=outcome_criteria,
-        evaluation_params=[
-            SingleTurnParams.INPUT,
-            SingleTurnParams.ACTUAL_OUTPUT,
-        ],
-        model=model,
-    )
+  outcome_validity = GEval(
+      name="OutcomeValidity",
+      criteria=outcome_criteria,
+      evaluation_params=[
+          SingleTurnParams.INPUT,
+          SingleTurnParams.ACTUAL_OUTPUT,
+      ],
+      model=model,
+  )
 
-    tool_invocation = GEval(
+  tool_invocation = GEval(
         name="ToolInvocation",
         criteria=tool_criteria,
         threshold=0.8,
@@ -113,36 +129,55 @@ def create_evaluation_metrics(model):
         model=model,
     )
 
-    return [outcome_validity, tool_invocation]
+  return [outcome_validity, tool_invocation]
 
 
 def evaluate_metrics_batch(detailed_results, project_id, gemini_model):
-    """Calculates batch metrics for a list of execution results."""
-    print("\nStarting batch post-processing evaluation metrics...")
-    for res in detailed_results:
-        prompt = res["input"]
-        actual_output = res["output"]
-        trajectory = res["trajectory"]
-        expected_output_raw = res["expected_output_raw"]
-        latency = res["latency"]
-        name = res["name"]
-        retrieval_context = res["retrieval_context"]
+  """Calculates batch metrics for a list of execution results."""
+  print("\nStarting batch post-processing evaluation metrics...")
+  for res in detailed_results:
+    prompt = res["input"]
+    actual_output = res["output"]
+    trajectory = res["trajectory"]
+    expected_output_raw = res["expected_output_raw"]
+    latency = res["latency"]
+    name = res["name"]
+    retrieval_context = res["retrieval_context"]
 
-        metrics = create_evaluation_metrics(gemini_model)
-        outcome_criteria = metrics[0].criteria
-        tool_criteria = metrics[1].criteria
+    metrics = create_evaluation_metrics(gemini_model)
+    outcome_criteria = metrics[0].criteria
+    tool_criteria = metrics[1].criteria
 
-        outcome_validity = GEval(
-            name="OutcomeValidity",
-            criteria=outcome_criteria,
-            evaluation_params=[
-                SingleTurnParams.INPUT,
-                SingleTurnParams.ACTUAL_OUTPUT,
-            ],
-            model=gemini_model,
-        )
+    checklist_items = [
+        line.strip("- ")
+        for line in expected_output_raw.split("\n")
+        if line.strip().startswith("-")
+    ]
+    dynamic_metrics = []
+    for item in checklist_items:
+      dynamic_metrics.append(
+          GEval(
+              name=f"Check: {item}",
+              criteria=(
+                  "Verify that the actual output fulfills this specific"
+                  f" requirement: {item}"
+              ),
+              evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+              model=gemini_model,
+          )
+      )
 
-        tool_invocation = GEval(
+    outcome_validity = GEval(
+        name="OutcomeValidity",
+        criteria=outcome_criteria,
+        evaluation_params=[
+            SingleTurnParams.INPUT,
+            SingleTurnParams.ACTUAL_OUTPUT,
+        ],
+        model=gemini_model,
+    )
+
+    tool_invocation = GEval(
             name="ToolInvocation",
             criteria=tool_criteria,
             threshold=0.8,
@@ -153,7 +188,7 @@ def evaluate_metrics_batch(detailed_results, project_id, gemini_model):
             model=gemini_model,
         )
 
-        outcome_test_case = LLMTestCase(
+    outcome_test_case = LLMTestCase(
             input=prompt,
             actual_output=actual_output if actual_output else "No response generated",
             expected_output=expected_output_raw.replace("{{PROJECT_ID}}", project_id),
@@ -161,38 +196,71 @@ def evaluate_metrics_batch(detailed_results, project_id, gemini_model):
             latency=latency,
         )
 
-        combined_actual = {
+    combined_actual = {
             "tools_used": res.get("tools", []),
             "execution_trace": trajectory
         }
-        tool_test_case = LLMTestCase(
+    tool_test_case = LLMTestCase(
             input=prompt,
             actual_output=json.dumps(combined_actual, indent=2),
             expected_output=expected_output_raw.replace("{{PROJECT_ID}}", project_id),
             latency=latency,
         )
 
-        print(f"Evaluating metrics for: {name}...")
-        outcome_result = evaluate([outcome_test_case], metrics=[outcome_validity])
-        tool_result = evaluate([tool_test_case], metrics=[tool_invocation])
+    print(f"Evaluating metrics for: {name}...")
+    outcome_result = evaluate([outcome_test_case], metrics=[outcome_validity])
+    tool_result = evaluate([tool_test_case], metrics=[tool_invocation])
 
-        scores = {}
-        for test_result in outcome_result.test_results:
-            for metric_data in test_result.metrics_data:
-                scores[metric_data.name] = {
+    scores = {}
+    for test_result in outcome_result.test_results:
+      for metric_data in test_result.metrics_data:
+        scores[metric_data.name] = {
                     "score": metric_data.score,
                     "success": metric_data.success,
                     "reason": getattr(metric_data, "reason", None)
                 }
-        for test_result in tool_result.test_results:
-            for metric_data in test_result.metrics_data:
-                scores[metric_data.name] = {
+    for test_result in tool_result.test_results:
+      for metric_data in test_result.metrics_data:
+        scores[metric_data.name] = {
                     "score": metric_data.score,
                     "success": metric_data.success,
                     "reason": getattr(metric_data, "reason", None)
                 }
 
-        res["scores"] = scores
+    if dynamic_metrics:
+      print(
+          f"Evaluating {len(dynamic_metrics)} dynamic metrics sequentially..."
+      )
+      for m in dynamic_metrics:
+        try:
+          print(f"Evaluating metric: {m.name}...")
+          result = evaluate([tool_test_case], metrics=[m])
+          for test_result in result.test_results:
+            for metric_data in test_result.metrics_data:
+              name = metric_data.name
+              if name.endswith(" [GEval]"):
+                name = name[:-8]
+              scores[name] = {
+                  "score": metric_data.score,
+                  "success": metric_data.success,
+                  "reason": getattr(metric_data, "reason", None),
+              }
+        except Exception as e:
+          print(f"Error evaluating metric {m.name}: {e}")
+
+      passed_checks = sum(
+          1 for m in dynamic_metrics if scores[m.name]["success"]
+      )
+      total_checks = len(dynamic_metrics)
+      scores["ChecklistScore"] = {
+          "score": passed_checks / total_checks if total_checks > 0 else 0.0,
+          "success": (
+              passed_checks / total_checks >= 0.8 if total_checks > 0 else False
+          ),
+          "reason": f"Passed {passed_checks} out of {total_checks} checks.",
+      }
+
+    res["scores"] = scores
 
 
 def main():

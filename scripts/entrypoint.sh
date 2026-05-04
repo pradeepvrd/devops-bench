@@ -24,15 +24,35 @@ export KUBECONFIG=/tmp/kubeconfig
 echo "Step 2: Bringing up cluster for $CLOUD_PROVIDER..."
 python3 scripts/infra.py "$CLOUD_PROVIDER" up
 
+# Step 2.5: Create Hello World App
+echo "Step 2.5: Creating Hello World Go App..."
+mkdir -p hello-app
+cat <<EOF > hello-app/main.go
+package main
+import "fmt"
+func main() {
+    fmt.Println("Hello, World! This is a simple Go application.")
+}
+EOF
+
 # Step 3: Call the eval script with the task to eval
 echo "Step 3: Running evaluation..."
-# TODO: This needs to be replaced by the actual eval run
-echo "Displaying task file content:"
-cat "$TASK_FILE"
+if [ -f "$HOME/deepeval_env/bin/activate" ]; then
+    echo "Activating virtual environment..."
+    source "$HOME/deepeval_env/bin/activate"
+fi
 
-# Simulate writing results to host
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-echo "{\"task\": \"$TASK_FILE\", \"status\": \"mock_success\"}" > "/app/results/results_$TIMESTAMP.json"
+python3 pkg/evaluator/evaluate.py "$TASK_FILE"
+
+# Step 3.5: Display results
+echo "Step 3.5: Displaying results..."
+LATEST_RESULTS=$(ls -t results/run_*/results.json 2>/dev/null | head -n 1)
+if [ -n "$LATEST_RESULTS" ] && [ -f "$LATEST_RESULTS" ]; then
+    echo "Latest results file: $LATEST_RESULTS"
+    cat "$LATEST_RESULTS"
+else
+    echo "Warning: No results file found."
+fi
 
 # Step 4: Call the deployer script to shut the environment down
 echo "Step 4: Tearing down cluster..."

@@ -8,24 +8,27 @@ from anthropic import AsyncAnthropicVertex
 class GeminiClientAdapter(LLMClient):
   """Adapter for Gemini SDK."""
 
-  def __init__(self, model_name="gemini-2.5-flash"):
+  def __init__(self, model_name=None):
+    if not model_name:
+      model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
     project_id = os.environ.get("VERTEX_PROJECT_ID")
     location = os.environ.get("VERTEX_LOCATION", "us-central1")
-    
+
     if project_id:
       self.client = genai.Client(vertexai=True, project=project_id, location=location)
     else:
       self.client = genai.Client()
-        
+
     self.model_name = model_name
 
   async def generate_content(self, contents, tools, system_instruction):
     gemini_contents = self._convert_to_gemini_messages(contents)
-    
+
     config_args = {"system_instruction": system_instruction}
     if tools and hasattr(tools, "function_declarations") and tools.function_declarations:
       config_args["tools"] = [tools]
-        
+
     return await self.client.aio.models.generate_content(
         model=self.model_name,
         contents=gemini_contents,
@@ -68,7 +71,7 @@ class GeminiClientAdapter(LLMClient):
     for msg in contents:
       role = msg["role"]
       content = msg["content"]
-      
+
       if role == "user":
         gemini_contents.append(
             types.Content(role="user", parts=[types.Part.from_text(text=content)])
@@ -101,25 +104,28 @@ class AnthropicClientAdapter(LLMClient):
   def __init__(self, model_name=None):
     project_id = os.environ.get("VERTEX_PROJECT_ID")
     location = os.environ.get("VERTEX_LOCATION", "us-central1")
-    
+
     if not model_name:
       model_name = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5@20250929")
-        
+
     if not project_id:
       print("Warning: VERTEX_PROJECT_ID not set. AsyncAnthropicVertex may fail if not inferred from environment.")
-        
+
     self.client = AsyncAnthropicVertex(region=location, project_id=project_id)
     self.model_name = model_name
 
   async def generate_content(self, contents, tools, system_instruction):
     messages = self._convert_to_anthropic_messages(contents)
-    return await self.client.messages.create(
-        model=self.model_name,
-        max_tokens=4096,
-        messages=messages,
-        tools=tools,
-        system=system_instruction,
-    )
+    kwargs = {
+        "model": self.model_name,
+        "max_tokens": 4096,
+        "messages": messages,
+        "tools": tools,
+    }
+    if system_instruction:
+      kwargs["system"] = system_instruction
+    print(f"DEBUG: Anthropic Messages: {messages}")
+    return await self.client.messages.create(**kwargs)
 
   def format_tools(self, mcp_tools):
     return [
@@ -156,11 +162,26 @@ class AnthropicClientAdapter(LLMClient):
     for msg in contents:
       role = msg["role"]
       content = msg["content"]
-      
+
       if role == "user":
         anthropic_messages.append({"role": "user", "content": content})
       elif role == "assistant":
-        anthropic_messages.append({"role": "assistant", "content": content})
+        if "tool_calls" in msg:
+          content_blocks = []
+          if content:
+            content_blocks.append({"type": "text", "text": content})
+          for tc in msg["tool_calls"]:
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id"),
+                "name": tc.get("name"),
+                "input": tc.get("args"),
+            })
+          anthropic_messages.append(
+              {"role": "assistant", "content": content_blocks}
+          )
+        else:
+          anthropic_messages.append({"role": "assistant", "content": content})
       elif role == "tool":
         anthropic_messages.append({
             "role": "user",

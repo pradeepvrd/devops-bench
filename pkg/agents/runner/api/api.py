@@ -74,7 +74,7 @@ async def process_query(
 
 
 
-async def _run_agent_loop(goal, tools, mcp_client, llm_client):
+async def _run_agent_loop(goal, tools, mcp_client, llm_client, system_instruction=None):
   """Internal loop for running the agent with given tools."""
   formatted_tools = llm_client.format_tools(tools)
 
@@ -88,7 +88,7 @@ async def _run_agent_loop(goal, tools, mcp_client, llm_client):
   while True:
     print(f"\n--- Turn {turn+1} ---")
     response, contents = await process_query(
-        llm_client, contents, formatted_tools, None, mcp_client
+        llm_client, contents, formatted_tools, system_instruction, mcp_client
     )
 
     function_calls = llm_client.extract_function_calls(response)
@@ -145,13 +145,13 @@ async def _run_agent_loop(goal, tools, mcp_client, llm_client):
 
 
 @observe(span_type="LLM")
-async def run_api_agent(goal, mcp_server_path, llm_client: LLMClient, use_mcp=True):
+async def run_api_agent(goal, mcp_server_path, llm_client: LLMClient, use_mcp=True, system_instruction=None):
   """Runs an agent that optionally connects to an MCP server."""
   if use_mcp:
     async with MCPClient(mcp_server_path) as mcp_client:
       result = await mcp_client.list_tools()
       tools = result.tools
-      return await _run_agent_loop(goal, tools, mcp_client, llm_client)
+      return await _run_agent_loop(goal, tools, mcp_client, llm_client, system_instruction=system_instruction)
   else:
     print("Running without MCP tools.")
-    return await _run_agent_loop(goal, [], None, llm_client)
+    return await _run_agent_loop(goal, [], None, llm_client, system_instruction=system_instruction)
