@@ -90,6 +90,8 @@ with open(path, 'w') as f:
     json.dump(data, f, indent=2)
 "
   echo "Gemini CLI GKE MCP extension configured successfully!"
+  echo "Linking skills..."
+  yes | gemini skills link skills
 else
   echo "Warning: gemini CLI not found in PATH. Skipping extension setup."
 fi
