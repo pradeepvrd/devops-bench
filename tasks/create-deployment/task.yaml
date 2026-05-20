@@ -117,3 +117,39 @@ expected_output: |
     selector:
       app: hypercomputer-d1-vllm-server
     type: ClusterIP
+
+documentation:
+  - doc_name: "Gemma vLLM Tutorial"
+    url: "https://cloud.google.com/kubernetes-engine/docs/tutorials/serve-gemma-gpu-vllm"
+    constraints:
+      - text: "nvidia-l4 accelerator type in nodeSelector"
+        critical: false
+  - doc_name: "GCS Fuse CSI Driver Guide"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/cloud-storage-fuse-csi-driver-sidecar"
+    constraints:
+      - text: "gke-gcsfuse/volumes: 'true' annotation in Deployment metadata"
+        critical: false
+      - text: "implicit-dirs mountOption"
+        critical: false
+  - doc_name: "GPU Setup Docs"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/gpus"
+    constraints:
+      - text: "nvidia.com/gpu resource limit of 1"
+        critical: true
+      - text: "nvidia.com/gpu toleration"
+        critical: true
+  - doc_name: "HPA Configuration Guide"
+    url: "https://cloud.google.com/kubernetes-engine/docs/how-to/horizontal-pod-autoscaling"
+    constraints:
+      - text: "HorizontalPodAutoscaler resource"
+        critical: false
+  - doc_name: "Workload Identity Overview"
+    url: "https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity"
+    constraints:
+      - text: "Dedicated ServiceAccount with iam.gke.io/gcp-service-account annotation"
+        critical: false
+  - doc_name: "Inference Best Practices (Quantization)"
+    url: "https://cloud.google.com/kubernetes-engine/docs/best-practices/machine-learning/inference#apply-quantization"
+    constraints:
+      - text: "--quantization fp8 container argument"
+        critical: true

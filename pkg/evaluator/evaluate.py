@@ -23,7 +23,7 @@ from pkg.agents.runner.api.llm_adapters import AnthropicClientAdapter, GeminiCli
 
 from pkg.agents.runner.api.api import run_api_agent
 from pkg.agents.runner.gcli import run_cli_agent
-from pkg.evaluator.loader import load_from_tasks_dir, safe_parse_yaml
+from pkg.evaluator.loader import load_from_tasks_dir, safe_parse_yaml, parse_documentation_from_yaml
 
 SYSTEM_INSTRUCTION = """You are an expert DevOps engineer. When asked to make an app production-ready, do not ask for clarification. Assume standard production requirements. Generate the manifest directly instead of asking the user for details."""
 
@@ -91,7 +91,7 @@ def replace_placeholders(text, project_id, cluster_name):
   )
 
 
-def print_configuration_context(cloud_provider, gcp_project_id, gke_cluster_name, bench_agent_type, agent_target, bench_use_mcp, app_location, agent_provider, agent_model, judge_provider, judge_model):
+def print_configuration_context(cloud_provider, gcp_project_id, gke_cluster_name, bench_agent_type, agent_target, bench_use_mcp, mcp_server_path, app_location, agent_provider, agent_model, judge_provider, judge_model):
   """Prints a formatted summary of the active evaluation configurations."""
   print("-" * 50)
   print("Configuration Context:")
@@ -101,6 +101,7 @@ def print_configuration_context(cloud_provider, gcp_project_id, gke_cluster_name
   print(f"  - BENCH_AGENT_TYPE:     {bench_agent_type}")
   print(f"  - AGENT_TARGET:         {agent_target}")
   print(f"  - BENCH_USE_MCP:        {bench_use_mcp}")
+  print(f"  - MCP_SERVER_PATH:      {mcp_server_path}")
   print(f"  - APP_LOCATION:         {app_location}")
   print(f"  - AGENT_PROVIDER:       {agent_provider}")
   print(f"  - AGENT_MODEL:          {agent_model}")
@@ -117,14 +118,17 @@ def load_evaluation_data(input_path):
   elif input_path.endswith((".yaml", ".yml")):
       print(f"Loading task specification from {input_path}...")
       with open(input_path, "r") as f:
-          content = safe_parse_yaml(f.read())
+          yaml_text = f.read()
+          content = safe_parse_yaml(yaml_text)
+          docs = parse_documentation_from_yaml(yaml_text)
           eval_data = [{
               "task_id": content.get("task_id", 1),
               "name": content.get("name", "Legacy Case"),
               "input": content.get("prompt", "").strip(),
               "expected_output": content.get("expected_output", "").strip(),
               "retrieval_context": content.get("retrieval_context", []),
-              "chaos_spec": content.get("chaos_spec")
+              "chaos_spec": content.get("chaos_spec"),
+              "documentation": docs
           }]
   else:
       with open(input_path, "r") as f:
@@ -159,6 +163,7 @@ def load_configuration_context():
       sys.exit(1)
 
   bench_use_mcp = os.environ.get("BENCH_USE_MCP", "true")
+  mcp_server_path = os.environ.get("MCP_SERVER_PATH", "third_party/gke-mcp/gke-mcp")
   app_location = os.environ.get("APP_LOCATION", "N/A")
   agent_provider = os.environ.get("AGENT_PROVIDER", "google")
   agent_model = os.environ.get("AGENT_MODEL", "gemini-3.1-pro-preview")
@@ -173,6 +178,7 @@ def load_configuration_context():
       bench_agent_type,
       agent_target,
       bench_use_mcp,
+      mcp_server_path,
       app_location,
       agent_provider,
       agent_model,
@@ -244,6 +250,112 @@ def create_evaluation_metrics(model):
   return [outcome_validity, tool_invocation]
 
 
+def evaluate_documentation_grounding(documentation, all_test_case, gemini_model, scores):
+  """Evaluates documentation constraints via GEval and calculates GroundingAccuracy."""
+  doc_metrics = []
+  doc_constraints_map = {}
+  for doc in documentation:
+    for constraint in doc.get("constraints", []):
+      c_text = constraint["text"]
+      c_crit = constraint["critical"]
+      doc_constraints_map[c_text] = c_crit
+      doc_metrics.append(
+          GEval(
+              name=f"Doc Constraint: {c_text}",
+              criteria=(
+                  "Verify that the actual output fulfills this specific"
+                  f" documentation constraint/requirement: {c_text}"
+              ),
+              evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+              model=gemini_model,
+          )
+      )
+
+  if not doc_metrics:
+    return
+
+  print(f"Evaluating {len(doc_metrics)} documentation constraint metrics sequentially...")
+  for m in doc_metrics:
+    try:
+      print(f"Evaluating doc metric: {m.name}...")
+      result = evaluate([all_test_case], metrics=[m])
+      for test_result in result.test_results:
+        for metric_data in test_result.metrics_data:
+          m_name = metric_data.name
+          if m_name.endswith(" [GEval]"):
+            m_name = m_name[:-8]
+          scores[m_name] = {
+              "score": metric_data.score,
+              "success": metric_data.success,
+              "reason": getattr(metric_data, "reason", None),
+          }
+    except Exception as e:
+      print(f"Error evaluating doc metric {m.name}: {e}")
+
+  total_constraints = len(doc_metrics)
+  applied_constraints = 0
+  critical_total = sum(1 for crit in doc_constraints_map.values() if crit)
+  critical_applied = 0
+
+  for c_text, c_crit in doc_constraints_map.items():
+    m_name = f"Doc Constraint: {c_text}"
+    if m_name in scores and scores[m_name]["success"]:
+      applied_constraints += 1
+      if c_crit:
+        critical_applied += 1
+
+  # Score 5.0 (Success), 2.5 (Partial), 0.0 (Failure)
+  if total_constraints == 0:
+    grounding_score = 5.0
+  elif applied_constraints == total_constraints:
+    grounding_score = 5.0
+  elif applied_constraints == 0:
+    grounding_score = 0.0
+  elif critical_applied < critical_total:
+    grounding_score = 2.5
+  else:
+    non_critical_total = total_constraints - critical_total
+    non_critical_applied = applied_constraints - critical_applied
+    if non_critical_total > 0:
+      grounding_score = 2.5 + 2.5 * (non_critical_applied / non_critical_total)
+    else:
+      grounding_score = 5.0
+
+  recall_accuracy = (
+      applied_constraints / total_constraints
+      if total_constraints > 0
+      else 1.0
+  )
+
+  scores["GroundingAccuracy"] = {
+      "score": grounding_score,
+      "success": grounding_score >= 4.0,
+      "reason": f"Applied {applied_constraints} out of {total_constraints} documented constraints (Critical: {critical_applied}/{critical_total}).",
+  }
+  scores["ParameterRecallAccuracy"] = recall_accuracy
+
+
+def calculate_doc_retrieval_rate(documentation, trajectory) -> float:
+  """Calculates the percentage of mapped documentation guides accessed in trajectory."""
+  if not documentation:
+    return 0.0
+
+  accessed_docs = set()
+  for doc in documentation:
+    doc_name_lower = doc["doc_name"].lower()
+    url_lower = doc["url"].lower()
+    found_in_trajectory = False
+    for step in trajectory:
+      step_str = json.dumps(step).lower()
+      if doc_name_lower in step_str or (url_lower and url_lower in step_str):
+        found_in_trajectory = True
+        break
+    if found_in_trajectory:
+      accessed_docs.add(doc["doc_name"])
+
+  return len(accessed_docs) / len(documentation) if len(documentation) > 0 else 0.0
+
+
 def evaluate_metrics_batch(detailed_results, gcp_project_id, gemini_model):
   """Calculates batch metrics for a list of execution results."""
   print("\nStarting batch post-processing evaluation metrics...")
@@ -255,6 +367,7 @@ def evaluate_metrics_batch(detailed_results, gcp_project_id, gemini_model):
     latency = res["latency"]
     name = res["name"]
     retrieval_context = res["retrieval_context"]
+    documentation = res.get("documentation", [])
 
     metrics = create_evaluation_metrics(gemini_model)
     outcome_criteria = metrics[0].criteria
@@ -405,6 +518,11 @@ def evaluate_metrics_batch(detailed_results, gcp_project_id, gemini_model):
           "reason": f"Passed {passed_checks} out of {total_checks} checks.",
       }
 
+    # Grounding Accuracy & Recall
+    if documentation:
+      evaluate_documentation_grounding(documentation, all_test_case, gemini_model, scores)
+      scores["DocRetrievalRate"] = calculate_doc_retrieval_rate(documentation, trajectory)
+
     if res.get("chaos_spec"):
       print(f"Evaluating Planned Chaos Mode and Performance metrics...")
       chaos_report = res.get("chaos_report", {})
@@ -514,6 +632,7 @@ def main():
         detailed_results[-1]["chaos_spec"] = item.get("chaos_spec")
         detailed_results[-1]["chaos_report"] = agent_res.get("chaos_report", {})
         detailed_results[-1]["perf_report"] = agent_res.get("perf_report", {})
+        detailed_results[-1]["documentation"] = item.get("documentation", [])
 
     # Save tasks execution outputs immediately
     with open(os.path.join(run_dir, "results.json"), "w") as f:
