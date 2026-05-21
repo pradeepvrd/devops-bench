@@ -24,6 +24,8 @@ from pkg.agents.runner.api.llm_adapters import AnthropicClientAdapter, GeminiCli
 from pkg.agents.runner.api.api import run_api_agent
 from pkg.agents.runner.gcli import run_cli_agent
 from pkg.evaluator.loader import load_from_tasks_dir, safe_parse_yaml, parse_documentation_from_yaml
+import threading
+from pkg.manager.manager import ScenarioManager
 
 SYSTEM_INSTRUCTION = """You are an expert DevOps engineer. When asked to make an app production-ready, do not ask for clarification. Assume standard production requirements. Generate the manifest directly instead of asking the user for details."""
 
@@ -49,12 +51,14 @@ class GeminiDeepEvalModel(DeepEvalBaseLLM):
 
     validate_config("judge", os.environ.get("JUDGE_PROVIDER", "google"), self.model_name)
 
-    if project_id:
+    if api_key:
+      self.client = genai.Client(api_key=api_key)
+    elif project_id:
       self.client = genai.Client(
           vertexai=True, project=project_id, location=location
       )
     else:
-      self.client = genai.Client(api_key=api_key)
+      self.client = genai.Client()
 
   def load_model(self):
     return self.client
@@ -358,6 +362,7 @@ def calculate_doc_retrieval_rate(documentation, trajectory) -> float:
 
 def evaluate_metrics_batch(detailed_results, gemini_model):
   """Calculates batch metrics for a list of execution results."""
+
   print("\nStarting batch post-processing evaluation metrics...")
   for res in detailed_results:
     prompt = res["input"]
@@ -593,6 +598,40 @@ def main():
         prompt = item["input"]
         prompt = replace_placeholders(prompt, gcp_project_id, gke_cluster_name)
 
+        target_deployment = os.environ.get("TARGET_DEPLOYMENT_NAME", "hypercomputer-d1-frontend")
+        namespace = os.environ.get("NAMESPACE", "default")
+        
+        chaos_spec = item.get("chaos_spec")
+        scenario_manager = None
+        
+        if chaos_spec:
+            try:
+                # Replace placeholders in chaos_spec string/dict
+                chaos_spec_processed = replace_placeholders(
+                    json.dumps(chaos_spec) if isinstance(chaos_spec, (dict, list)) else str(chaos_spec),
+                    gcp_project_id, 
+                    gke_cluster_name
+                )
+                spec_list = json.loads(chaos_spec_processed)
+                if spec_list:
+                    spec = spec_list[0]
+                    scenario_manager = ScenarioManager(target_deployment, namespace)
+                    t = threading.Thread(
+                        target=scenario_manager.run_chaos_and_verification, 
+                        args=(spec,)
+                    )
+                    t.daemon = True
+                    t.start()
+            except Exception as e:
+                print(f"Warning: Failed to start ScenarioManager: {e}")
+        
+        if scenario_manager:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            print(f"[{timestamp}] Waiting for Chaos Agent to establish the GKE load spike...", flush=True)
+            scenario_manager.chaos_active_event.wait(timeout=45)
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            print(f"[{timestamp}] GKE load spike is now active. Proceeding with Operator Agent...", flush=True)
+
         print(f"Executing agent for prompt: {prompt}")
         
         before_files = set(os.listdir("."))
@@ -630,8 +669,16 @@ def main():
         detailed_results[-1]["name"] = item["name"]
         detailed_results[-1]["retrieval_context"] = item.get("retrieval_context", [])
         detailed_results[-1]["chaos_spec"] = item.get("chaos_spec")
-        detailed_results[-1]["chaos_report"] = agent_res.get("chaos_report", {})
-        detailed_results[-1]["perf_report"] = agent_res.get("perf_report", {})
+        
+        chaos_report = {}
+        perf_report = {}
+        if scenario_manager:
+            print("[ScenarioManager] Waiting for background metrics collection to complete...", flush=True)
+            t.join(timeout=90)
+            chaos_report, perf_report = scenario_manager.get_reports()
+            
+        detailed_results[-1]["chaos_report"] = chaos_report
+        detailed_results[-1]["perf_report"] = perf_report
         detailed_results[-1]["documentation"] = item.get("documentation", [])
 
     # Save tasks execution outputs immediately

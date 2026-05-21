@@ -81,7 +81,7 @@ class TestVerifierAgent(unittest.TestCase):
         )
 
         spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        result = self.verifier.wait_for_condition(spec, timeout=60)
+        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
 
         self.assertTrue(result["success"])
         self.assertEqual(result["reason"], "Condition met via kubectl wait")
@@ -106,7 +106,7 @@ class TestVerifierAgent(unittest.TestCase):
         ]
 
         spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        result = self.verifier.wait_for_condition(spec, timeout=60)
+        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
 
         self.assertFalse(result["success"])
         self.assertIn("kubectl wait failed or timed out", result["reason"])
@@ -122,7 +122,7 @@ class TestVerifierAgent(unittest.TestCase):
         ]
 
         spec = {"type": "scaling_complete", "deployment": "my-dep"}
-        result = self.verifier._wait_polling_backoff(spec, timeout=60)
+        result = self.verifier._wait_polling_backoff(spec, timeout_sec=60)
 
         self.assertTrue(result["success"])
         self.assertEqual(result["reason"], "Condition met via polling")

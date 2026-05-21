@@ -60,7 +60,7 @@ class VerifierAgent:
         delay = 1  # Start with 1s delay (Option 1)
         max_delay = 10
 
-        while time.time() - start_time < timeout:
+        while time.time() - start_time < timeout_sec:
             success, details = self._check_condition(spec)
             if success:
                 return {

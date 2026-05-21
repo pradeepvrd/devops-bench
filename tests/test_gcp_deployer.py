@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import os
 import sys
 
@@ -19,9 +19,11 @@ class TestGCPDeployer(unittest.TestCase):
 
     @patch('subprocess.run')
     def test_up(self, mock_run):
+        # Mock describe check to return failure so that GKE cluster is created
+        mock_run.return_value = MagicMock(returncode=1)
         self.deployer.up()
-        mock_run.assert_called_once()
-        args, kwargs = mock_run.call_args
+        self.assertEqual(mock_run.call_count, 2)
+        args, kwargs = mock_run.call_args_list[1]
         cmd = args[0]
         self.assertIn("kubetest2", cmd)
         self.assertIn("gke", cmd)
@@ -35,10 +37,12 @@ class TestGCPDeployer(unittest.TestCase):
         
     @patch('subprocess.run')
     def test_up_with_config(self, mock_run):
+        # Mock describe check to return failure so that GKE cluster is created
+        mock_run.return_value = MagicMock(returncode=1)
         deployer = GCPDeployer(self.project, self.zone, self.cluster_name, machine_type="n1-standard-4", num_nodes=5)
         deployer.up()
-        mock_run.assert_called_once()
-        args, kwargs = mock_run.call_args
+        self.assertEqual(mock_run.call_count, 2)
+        args, kwargs = mock_run.call_args_list[1]
         cmd = args[0]
         self.assertIn("--machine-type", cmd)
         self.assertIn("n1-standard-4", cmd)

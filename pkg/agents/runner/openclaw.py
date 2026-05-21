@@ -3,15 +3,19 @@ import os
 import re
 import subprocess
 import time
+import getpass
 from deepeval.tracing import observe
 
 
 @observe()
 def run_openclaw_agent(prompt, context=None, agent_name="main"):
     """Runs OpenClaw agent on GCE VM via SSH."""
-    ssh_user = os.environ.get("OPENCLAW_SSH_USER", "simrankaurk_google_com")
-    vm_host = os.environ.get("OPENCLAW_VM_HOST", "nic0.claw-ubuntu.us-central1-a.c.simrankaurk-gke-dev.internal.gcpnode.com")
-    ssh_key = os.environ.get("OPENCLAW_SSH_KEY", "/usr/local/google/home/simrankaurk/.ssh/google_compute_engine")
+    current_user = getpass.getuser()
+    project_id = os.environ.get("GCP_PROJECT_ID", "simrankaurk-gke-dev")
+
+    ssh_user = os.environ.get("OPENCLAW_SSH_USER", f"{current_user}_google_com")
+    vm_host = os.environ.get("OPENCLAW_VM_HOST", f"nic0.claw-ubuntu.us-central1-a.c.{project_id}.internal.gcpnode.com")
+    ssh_key = os.environ.get("OPENCLAW_SSH_KEY", os.path.expanduser("~/.ssh/google_compute_engine"))
 
     # We use --local and --agent as discovered by the user
     # We also use single quotes for the prompt, assuming it doesn't contain single quotes.
