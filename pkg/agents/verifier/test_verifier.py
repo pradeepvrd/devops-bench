@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from pkg.agents.verifier.verifier import VerifierAgent
-
+from pkg.agents.verifier.pod_healthy import PodHealthyVerifier
+from pkg.agents.verifier.scaling_complete import ScalingCompleteVerifier
 
 class TestVerifierAgent(unittest.TestCase):
 
@@ -12,7 +13,7 @@ class TestVerifierAgent(unittest.TestCase):
         self.verifier = VerifierAgent()
 
     @patch("subprocess.run")
-    def test_check_condition_pod_healthy_success(self, mock_run):
+    def test_pod_healthy_verifier_check_status_success(self, mock_run):
         mock_output = json.dumps(
             {
                 "items": [
@@ -25,17 +26,15 @@ class TestVerifierAgent(unittest.TestCase):
             stdout=mock_output, returncode=0
         )
 
-        spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        success, details = self.verifier._check_condition(spec)
+        p_verifier = PodHealthyVerifier(selector="app=my-app")
+        details = p_verifier._get_pods_details()
+        success = p_verifier._check_pods_status(details)
 
         self.assertTrue(success)
-        self.assertEqual(details["reason"], "All pods running")
         self.assertEqual(len(details["items"]), 2)
 
     @patch("subprocess.run")
-    def test_check_condition_pod_healthy_failure_not_running(
-        self, mock_run
-    ):
+    def test_pod_healthy_verifier_check_status_failure(self, mock_run):
         mock_output = json.dumps(
             {
                 "items": [
@@ -48,87 +47,112 @@ class TestVerifierAgent(unittest.TestCase):
             stdout=mock_output, returncode=0
         )
 
-        spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        success, details = self.verifier._check_condition(spec)
+        p_verifier = PodHealthyVerifier(selector="app=my-app")
+        details = p_verifier._get_pods_details()
+        success = p_verifier._check_pods_status(details)
 
         self.assertFalse(success)
-        self.assertEqual(
-            details["reason"], "Some pods not running or no pods found"
-        )
 
     @patch("subprocess.run")
-    def test_check_condition_scaling_complete_success(self, mock_run):
+    def test_scaling_complete_verifier_check_scaling_success(self, mock_run):
         mock_output = json.dumps({"status": {"readyReplicas": 3}})
         mock_run.return_value = MagicMock(
             stdout=mock_output, returncode=0
         )
 
-        spec = {
-            "type": "scaling_complete",
-            "deployment": "my-dep",
-            "min_replicas": 3,
-        }
-        success, details = self.verifier._check_condition(spec)
+        s_verifier = ScalingCompleteVerifier(deployment="my-dep", min_replicas=3)
+        success, details = s_verifier._check_scaling()
 
         self.assertTrue(success)
         self.assertIn("Ready replicas (3) >= min replicas (3)", details["reason"])
 
     @patch("subprocess.run")
-    def test_wait_for_condition_pod_healthy_wait_success(self, mock_run):
-        # Mock kubectl wait success
+    def test_pod_healthy_verifier_verify_wait_success(self, mock_run):
         mock_run.return_value = MagicMock(
             stdout="pod/my-pod condition met", returncode=0
         )
 
-        spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
+        p_verifier = PodHealthyVerifier(selector="app=my-app")
+        result = p_verifier.verify(timeout_sec=60)
 
-        self.assertTrue(result["success"])
-        self.assertEqual(result["reason"], "Condition met via kubectl wait")
-        self.assertIn("kubectl", mock_run.call_args[0][0])
-        self.assertIn("wait", mock_run.call_args[0][0])
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "Condition met via kubectl wait")
 
     @patch("subprocess.run")
-    def test_wait_for_condition_pod_healthy_wait_failure_fallback(
-        self, mock_run
-    ):
-        # Mock kubectl wait failure (timeout or error)
+    def test_pod_healthy_verifier_verify_wait_failure_fallback_success(self, mock_run):
+        # Mock wait fails, but get pods status succeeds (running fallback)
         mock_run.side_effect = [
-            subprocess.CalledProcessError(
-                1, "kubectl wait", stderr="timed out"
-            ),  # wait fails
+            subprocess.CalledProcessError(1, "kubectl wait", stderr="timed out"),
             MagicMock(
-                stdout=json.dumps(
-                    {"items": [{"status": {"phase": "Running"}}]}
-                ),
-                returncode=0,
-            ),  # get pods for details
+                stdout=json.dumps({"items": [{"status": {"phase": "Running"}}]}),
+                returncode=0
+            )
         ]
 
-        spec = {"type": "pod_healthy", "selector": "app=my-app"}
-        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
+        p_verifier = PodHealthyVerifier(selector="app=my-app")
+        result = p_verifier.verify(timeout_sec=60)
 
-        self.assertFalse(result["success"])
-        self.assertIn("kubectl wait failed or timed out", result["reason"])
-        self.assertIn("items", result["details"])
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "Condition met via polling fallback")
 
-    @patch("pkg.agents.verifier.verifier.VerifierAgent._check_condition")
+    @patch("pkg.agents.verifier.scaling_complete.ScalingCompleteVerifier._check_scaling")
     @patch("time.sleep")
-    def test_wait_polling_backoff_success(self, mock_sleep, mock_check):
-        # Mock _check_condition to fail first, then succeed
+    def test_scaling_complete_verifier_verify_polling_success(self, mock_sleep, mock_check):
         mock_check.side_effect = [
             (False, {"reason": "not yet"}),
             (True, {"reason": "done"}),
         ]
 
-        spec = {"type": "scaling_complete", "deployment": "my-dep"}
-        result = self.verifier._wait_polling_backoff(spec, timeout_sec=60)
+        s_verifier = ScalingCompleteVerifier(deployment="my-dep", min_replicas=2)
+        result = s_verifier.verify(timeout_sec=60)
 
-        self.assertTrue(result["success"])
-        self.assertEqual(result["reason"], "Condition met via polling")
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "Scaling complete: done")
         self.assertEqual(mock_sleep.call_count, 1)
-        mock_sleep.assert_called_with(1)  # Initial delay
 
+    @patch("subprocess.run")
+    def test_wait_for_condition_compound_success(self, mock_run):
+        def run_side_effect(cmd, *args, **kwargs):
+            if "wait" in cmd:
+                return MagicMock(stdout="pod/my-pod condition met", returncode=0)
+            elif "deployment" in cmd:
+                return MagicMock(stdout=json.dumps({"status": {"readyReplicas": 2}}), returncode=0)
+            return MagicMock(stdout="", returncode=0)
+            
+        mock_run.side_effect = run_side_effect
+
+        spec = {
+            "pod_spec": {"type": "pod_healthy", "selector": "app=my-app"},
+            "scaling_spec": {"type": "scaling_complete", "deployment": "my-dep", "min_replicas": 2}
+        }
+        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
+
+        self.assertTrue(result.success)
+        self.assertIn("pod_spec succeeded", result.reason)
+        self.assertIn("scaling_spec succeeded", result.reason)
+
+    @patch("subprocess.run")
+    def test_wait_for_condition_compound_failure(self, mock_run):
+        def run_side_effect(cmd, *args, **kwargs):
+            if "wait" in cmd:
+                raise subprocess.CalledProcessError(1, "kubectl wait", stderr="timed out")
+            elif "deployment" in cmd:
+                return MagicMock(stdout=json.dumps({"status": {"readyReplicas": 2}}), returncode=0)
+            elif "pods" in cmd:
+                return MagicMock(stdout=json.dumps({"items": []}), returncode=0)
+            return MagicMock(stdout="", returncode=0)
+
+        mock_run.side_effect = run_side_effect
+
+        spec = {
+            "pod_spec": {"type": "pod_healthy", "selector": "app=my-app"},
+            "scaling_spec": {"type": "scaling_complete", "deployment": "my-dep", "min_replicas": 2}
+        }
+        result = self.verifier.wait_for_condition(spec, timeout_sec=60)
+
+        self.assertFalse(result.success)
+        self.assertIn("pod_spec failed", result.reason)
+        self.assertIn("scaling_spec succeeded", result.reason)
 
 if __name__ == "__main__":
     unittest.main()

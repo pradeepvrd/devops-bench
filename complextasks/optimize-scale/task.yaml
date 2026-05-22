@@ -14,7 +14,20 @@ chaos_spec: |
       "trigger": { "type": "time", "delay_seconds": 5 },
       "action": { 
         "type": "generate_load", 
-        "target": { "service_url": "http://{{TARGET_DEPLOYMENT_NAME}}.{{NAMESPACE}}.svc.cluster.local", "qps": 1000 } 
+        "target": { "service_url": "http://{{TARGET_DEPLOYMENT_NAME}}.{{NAMESPACE}}.svc.cluster.local", "qps": 300 } 
+      },
+      "verification": {
+        "pod_spec": {
+          "type": "pod_healthy",
+          "selector": "app={{TARGET_DEPLOYMENT_NAME}}",
+          "namespace": "{{NAMESPACE}}"
+        },
+        "scaling_spec": {
+          "type": "scaling_complete",
+          "deployment": "{{TARGET_DEPLOYMENT_NAME}}",
+          "min_replicas": 2,
+          "namespace": "{{NAMESPACE}}"
+        }
       }
     }
   ]

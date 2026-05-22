@@ -1,160 +1,64 @@
-import json
-import subprocess
 import time
-
+from typing import Union
+from pkg.agents.verifier.base import VerificationResult
+from pkg.agents.verifier.spec import VerificationSpec
 
 class VerifierAgent:
     """Uses kubectl to validate cluster state."""
 
     def wait_for_condition(
-        self, spec: dict, timeout_sec: int = 120
-    ) -> dict:
-        """Waits for condition using watch (kubectl wait) or polling with backoff."""
-        c_type = spec.get("type")
+        self, spec: Union[VerificationSpec, dict, list], timeout_sec: int = 120
+    ) -> VerificationResult:
+        """Waits for condition using watch or polling.
+        Supports compound specifications (list or dict of specs) as well as single specs.
+        """
+        if not isinstance(spec, VerificationSpec):
+            spec = VerificationSpec(spec)
+
+        root = spec.root
         start_time = time.time()
 
-        if c_type == "pod_healthy":
-            # Try using kubectl wait (Option 3)
-            selector = spec.get("selector")
-            namespace = spec.get("namespace")
-            if selector:
-                cmd = [
-                    "kubectl",
-                    "wait",
-                    "--for=condition=Ready",
-                    "pod",
-                    "-l",
-                    selector,
-                    f"--timeout={timeout_sec}s",
-                ]
-                if namespace:
-                    cmd.extend(["-n", namespace])
-
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, check=True
-                    )
-                    return {
-                        "success": True,
-                        "elapsed_time": time.time() - start_time,
-                        "reason": "Condition met via kubectl wait",
-                        "details": {"output": result.stdout.strip()},
-                    }
-                except subprocess.CalledProcessError as e:
-                    # Fallback or get details on failure
-                    elapsed = time.time() - start_time
-                    # Get details for failure report (Option 2)
-                    details = self._get_pods_details(selector, namespace)
-                    return {
-                        "success": False,
-                        "elapsed_time": elapsed,
-                        "reason": f"kubectl wait failed or timed out: {e.stderr.strip()}",
-                        "details": details,
-                    }
-
-        # Fallback to Polling with Exponential Backoff (Option 1)
-        return self._wait_polling_backoff(spec, timeout_sec)
-
-    def _wait_polling_backoff(self, spec: dict, timeout_sec: int) -> dict:
-        start_time = time.time()
-        delay = 1  # Start with 1s delay (Option 1)
-        max_delay = 10
-
-        while time.time() - start_time < timeout_sec:
-            success, details = self._check_condition(spec)
-            if success:
-                return {
-                    "success": True,
-                    "elapsed_time": time.time() - start_time,
-                    "reason": "Condition met via polling",
-                    "details": details,
-                }
-
-            time.sleep(delay)
-            delay = min(delay * 2, max_delay)  # Exponential backoff
-
-        # Timeout
-        success, details = self._check_condition(spec)
-        return {
-            "success": success,
-            "elapsed_time": time.time() - start_time,
-            "reason": "Timeout reached during polling",
-            "details": details,
-        }
-
-    def _check_condition(self, spec: dict) -> (bool, dict):
-        """Checks condition and returns (success, details)."""
-        c_type = spec.get("type")
-
-        if c_type == "pod_healthy":
-            selector = spec.get("selector")
-            namespace = spec.get("namespace")
-            details = self._get_pods_details(selector, namespace)
-            items = details.get("items", [])
-            success = len(items) > 0 and all(
-                p.get("status", {}).get("phase") == "Running" for p in items
+        if isinstance(root, list):
+            results = []
+            overall_success = True
+            overall_reason = []
+            for i, sub_spec in enumerate(root):
+                elapsed = time.time() - start_time
+                remaining_timeout = max(1, timeout_sec - int(elapsed))
+                sub_result = self.wait_for_condition(VerificationSpec(sub_spec), timeout_sec=remaining_timeout)
+                results.append(sub_result)
+                if not sub_result.success:
+                    overall_success = False
+                    overall_reason.append(f"spec[{i}] failed: {sub_result.reason}")
+                else:
+                    overall_reason.append(f"spec[{i}] succeeded")
+            return VerificationResult(
+                success=overall_success,
+                elapsed_time=time.time() - start_time,
+                reason="; ".join(overall_reason),
+                details=results,
             )
-            reason = (
-                "All pods running"
-                if success
-                else "Some pods not running or no pods found"
+
+        if isinstance(root, dict):
+            results = {}
+            overall_success = True
+            overall_reason = []
+            for name, sub_spec in root.items():
+                elapsed = time.time() - start_time
+                remaining_timeout = max(1, timeout_sec - int(elapsed))
+                sub_result = self.wait_for_condition(VerificationSpec(sub_spec), timeout_sec=remaining_timeout)
+                results[name] = sub_result
+                if not sub_result.success:
+                    overall_success = False
+                    overall_reason.append(f"{name} failed: {sub_result.reason}")
+                else:
+                    overall_reason.append(f"{name} succeeded")
+            return VerificationResult(
+                success=overall_success,
+                elapsed_time=time.time() - start_time,
+                reason="; ".join(overall_reason),
+                details=results,
             )
-            return success, {"reason": reason, "items": items}
 
-        elif c_type == "scaling_complete":
-            deployment_name = spec.get("deployment")
-            min_replicas = spec.get("min_replicas", 1)
-            namespace = spec.get("namespace")
-            if not deployment_name:
-                return False, {"reason": "Deployment name missing"}
-
-            try:
-                cmd = [
-                    "kubectl",
-                    "get",
-                    "deployment",
-                    deployment_name,
-                    "-o",
-                    "json",
-                ]
-                if namespace:
-                    cmd.extend(["-n", namespace])
-
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, check=True
-                )
-                dep_data = json.loads(result.stdout)
-                ready_replicas = (
-                    dep_data.get("status", {}).get("readyReplicas", 0)
-                )
-                success = ready_replicas >= min_replicas
-                reason = (
-                    f"Ready replicas ({ready_replicas}) >= min replicas ({min_replicas})"
-                    if success
-                    else f"Ready replicas ({ready_replicas}) < min replicas ({min_replicas})"
-                )
-                return success, {"reason": reason, "deployment": dep_data}
-            except subprocess.CalledProcessError as e:
-                return False, {
-                    "reason": f"Failed to get deployment: {e.stderr.strip()}"
-                }
-            except json.JSONDecodeError:
-                return False, {"reason": "Failed to parse deployment JSON"}
-
-        return False, {"reason": f"Unknown condition type: {c_type}"}
-
-    def _get_pods_details(self, selector: str, namespace: str) -> dict:
-        """Helper to get pods details."""
-        if not selector:
-            return {}
-        try:
-            cmd = ["kubectl", "get", "pods", "-l", selector, "-o", "json"]
-            if namespace:
-                cmd.extend(["-n", namespace])
-
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True
-            )
-            return json.loads(result.stdout)
-        except Exception as e:
-            return {"error": str(e)}
+        # root is a SingleVerificationSpec (PodHealthyVerifier or ScalingCompleteVerifier)
+        return root.verify(timeout_sec)
