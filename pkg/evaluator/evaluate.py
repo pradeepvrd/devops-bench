@@ -599,7 +599,16 @@ def evaluate_metrics_batch(detailed_results, judge_model):
       
       diag_metric = GEval(
           name="DiagnosisAccuracy",
-          criteria=f"Did the agent accurately identify that the fault injected was '{actual_fault}'?",
+          criteria=(
+              f"Did the agent explicitly detect/acknowledge the active '{actual_fault}' fault in its text output AND "
+              f"propose or apply a valid structural remediation, configuration adjustment, or self-healing mechanism "
+              f"that architecturally solves and prevents it? "
+              f"To get a perfect score (1.0), the agent MUST fulfill BOTH requirements: (1) explicitly acknowledge/diagnose "
+              f"the active fault or outage in the text, and (2) propose the correct structural remediation to solve it. "
+              f"Proposing general best-practice configurations that happen to resolve the actual fault but without "
+              f"explicitly acknowledging or realizing the active fault/disruption must be graded as a partial success "
+              f"and receive a maximum score of 0.5."
+          ),
           evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
           model=judge_model,
       )
