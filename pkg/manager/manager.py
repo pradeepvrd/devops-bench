@@ -4,6 +4,7 @@ import time
 import subprocess
 import datetime
 from pkg.agents.chaos.chaos import ChaosAgent
+from pkg.agents.verifier.verifier import VerifierAgent
 
 def log(msg):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -18,6 +19,7 @@ class ScenarioManager:
         self.chaos_active_event = threading.Event()
         self.chaos_agent = ChaosAgent()
         self.chaos_agent.chaos_active_event = self.chaos_active_event
+        self.verifier_agent = VerifierAgent()
         self.result_holder = {
             "chaos_report": {},
             "perf_report": {}
@@ -29,6 +31,7 @@ class ScenarioManager:
         self.start_time = time.time()
         trigger = spec.get("trigger", {})
         action = spec.get("action", {})
+        verification = spec.get("verification", {})
         
         # Record initial chaos metadata
         self.result_holder["chaos_report"] = {
@@ -44,6 +47,31 @@ class ScenarioManager:
             log(f"[ScenarioManager] Error running scenario: {e}")
             self.result_holder["chaos_report"]["status"] = "failed"
             self.result_holder["chaos_report"]["error"] = str(e)
+            return
+
+        # Execute planned verification if provided in the spec
+        if verification:
+            log(f"[ScenarioManager] Starting planned verification using VerifierAgent...")
+            try:
+                verification_result = self.verifier_agent.wait_for_condition(verification, timeout_sec=120)
+                log(f"[ScenarioManager] Verification completed: {verification_result.model_dump_json(indent=2)}")
+                self.result_holder["chaos_report"]["verification"] = verification_result.model_dump()
+                
+                # Populate performance reports dynamically based on verification outcomes
+                elapsed_time = verification_result.elapsed_time
+                success = verification_result.success
+                
+                self.result_holder["perf_report"] = {
+                    "deployment_time_seconds": elapsed_time if success else None,
+                    "uptime_percentage": 100.0 if success else 0.0,
+                    "resource_utilization_efficiency": 1.0 if success else 0.0,
+                }
+            except Exception as e:
+                log(f"[ScenarioManager] Verification failed with exception: {e}")
+                self.result_holder["chaos_report"]["verification"] = {
+                    "success": False,
+                    "reason": f"Verification exception: {str(e)}"
+                }
 
     def _inject_chaos_with_delay(self, trigger, action):
         """Delays execution if specified, brings up kubectl port-forward, and executes chaos agent."""
