@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict
 
 def resolve_variables(
@@ -12,4 +13,6 @@ def resolve_variables(
     variables.setdefault("project_id", global_project_id)
     variables.setdefault("cluster_name", global_cluster_name)
     variables.setdefault("location", global_location)
+    if "NAMESPACE" in os.environ:
+        variables.setdefault("namespace", os.environ["NAMESPACE"])
     return variables

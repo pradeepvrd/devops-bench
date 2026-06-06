@@ -25,3 +25,21 @@ variable "machine_type" {
   type        = string
   default     = "e2-standard-2"
 }
+
+variable "enable_workload_identity" {
+  description = "Enable GKE Workload Identity"
+  type        = bool
+  default     = false
+}
+
+variable "agent_service_account" {
+  description = "The service account email of the agent"
+  type        = string
+  default     = ""
+}
+
+variable "enable_iap_ssh" {
+  description = "Enable IAP SSH firewall rule for the cluster"
+  type        = bool
+  default     = false
+}

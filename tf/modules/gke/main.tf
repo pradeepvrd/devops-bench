@@ -27,6 +27,27 @@ resource "google_project_iam_member" "gke_nodes_metadata_writer" {
   member  = "serviceAccount:${google_service_account.gke_nodes.email}"
 }
 
+resource "google_project_iam_member" "agent_container_admin" {
+  count   = var.agent_service_account != "" ? 1 : 0
+  project = var.project_id
+  role    = "roles/container.admin"
+  member  = "serviceAccount:${var.agent_service_account}"
+}
+
+resource "google_compute_firewall" "allow_iap_ssh" {
+  count   = var.enable_iap_ssh ? 1 : 0
+  name    = "allow-iap-ssh-${var.cluster_name}"
+  network = "default"
+  project = var.project_id
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["35.235.240.0/20"]
+}
+
 resource "google_container_cluster" "primary" {
   name     = var.cluster_name
   location = var.location
@@ -34,6 +55,13 @@ resource "google_container_cluster" "primary" {
   remove_default_node_pool = true
   initial_node_count       = 1
   deletion_protection      = false
+
+  dynamic "workload_identity_config" {
+    for_each = var.enable_workload_identity ? [1] : []
+    content {
+      workload_pool = "${var.project_id}.svc.id.goog"
+    }
+  }
 }
 
 resource "google_container_node_pool" "primary_nodes" {
@@ -50,6 +78,13 @@ resource "google_container_node_pool" "primary_nodes" {
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform"
     ]
+
+    dynamic "workload_metadata_config" {
+      for_each = var.enable_workload_identity ? [1] : []
+      content {
+        mode = "GKE_METADATA"
+      }
+    }
   }
 }
 
@@ -60,3 +95,12 @@ output "cluster_name" {
 output "cluster_location" {
   value = google_container_cluster.primary.location
 }
+
+output "endpoint" {
+  value = google_container_cluster.primary.endpoint
+}
+
+output "cluster_ca_certificate" {
+  value = google_container_cluster.primary.master_auth[0].cluster_ca_certificate
+}
+

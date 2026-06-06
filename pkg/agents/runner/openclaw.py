@@ -20,11 +20,10 @@ def run_openclaw_agent(prompt, context=None, agent_name="main"):
     # We use --local and --agent as discovered by the user
     # We also use single quotes for the prompt, assuming it doesn't contain single quotes.
     # For safety, we should escape single quotes if possible, but let's keep it simple first.
-    remote_command = f"export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && source \"$NVM_DIR/nvm.sh\" && ~/bin/oc --log-level debug agent --local --agent {agent_name} -m '{prompt}'"
+    remote_command = f"rm -rf ~/.openclaw/agents/operator/sessions/* && export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && source \"$NVM_DIR/nvm.sh\" && ~/bin/oc --log-level debug agent --local --agent {agent_name} -m '{prompt}'"
 
     ssh_cmd = [
         "ssh",
-        "-q",
         "-i",
         ssh_key,
         f"{ssh_user}@{vm_host}",
@@ -50,7 +49,6 @@ def run_openclaw_agent(prompt, context=None, agent_name="main"):
             # Read session file via SSH
             read_cmd = [
                 "ssh",
-                "-q",
                 "-i",
                 ssh_key,
                 f"{ssh_user}@{vm_host}",

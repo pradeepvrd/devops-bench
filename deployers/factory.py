@@ -23,9 +23,14 @@ def get_deployer(
 
     Enforces GCP_LOCATION as the standard environment variable for location.
     """
-    # Check if CLOUD_PROVIDER environment variable overrides the task-level deployer
+    # Respect task-level deployer first, fallback to cloud_provider if it is a valid deployer, otherwise default to terraform
     cloud_provider = os.environ.get("CLOUD_PROVIDER", "").lower()
-    deployer_type = cloud_provider if cloud_provider else infra_config.get("deployer", "tofu")
+    deployer_type = infra_config.get("deployer")
+    if not deployer_type:
+        if cloud_provider in ["tofu", "gcp"]:
+            deployer_type = cloud_provider
+        else:
+            deployer_type = "tofu"
 
     # Resolve Location with strict precedence: argument then GCP_LOCATION env var
     location = global_location or os.environ.get("GCP_LOCATION", "us-central1-a")
