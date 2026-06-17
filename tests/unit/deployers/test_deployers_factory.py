@@ -21,8 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from devops_bench.core import ConfigError
 from devops_bench.deployers.factory import get_deployer
-from devops_bench.deployers.gcp import GCPDeployer
+from devops_bench.deployers.noop import NoOpDeployer
 from devops_bench.deployers.tofu import _TF_ROOT, TFDeployer
 
 
@@ -51,14 +52,14 @@ def test_get_deployer_default(mocker, base_config):
     assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/kind")
 
 
-def test_get_deployer_kubetest2(base_config):
-    deployer = get_deployer(
-        {"deployer": "kubetest2"},
-        base_config["project_id"],
-        base_config["cluster_name"],
-        base_config["location"],
-    )
-    assert isinstance(deployer, GCPDeployer)
+def test_get_deployer_unsupported(base_config):
+    with pytest.raises(ConfigError):
+        get_deployer(
+            {"deployer": "kubetest2"},
+            base_config["project_id"],
+            base_config["cluster_name"],
+            base_config["location"],
+        )
 
 
 def test_get_deployer_tofu_default_stack(mocker, base_config):
@@ -106,17 +107,6 @@ def test_get_deployer_tofu_custom_stack_and_vars(mocker, base_config):
     assert deployer.tf_dir == str(_TF_ROOT / "custom/stack")
 
 
-def test_get_deployer_location_from_env(mocker, base_config):
-    mocker.patch.dict(os.environ, {"GCP_LOCATION": "us-west1-b"})
-    deployer = get_deployer(
-        {"deployer": "kubetest2"},
-        base_config["project_id"],
-        base_config["cluster_name"],
-        global_location=None,
-    )
-    assert deployer.zone == "us-west1-b"
-
-
 def test_get_deployer_tofu_kind_stack(mocker, base_config):
     mocker.patch("devops_bench.deployers.tofu.Path.exists", return_value=True)
     deployer = get_deployer(
@@ -132,3 +122,29 @@ def test_get_deployer_tofu_kind_stack(mocker, base_config):
         "kubeconfig_path": _expected_kubeconfig(),
     }
     assert deployer.tf_dir == str(_TF_ROOT / "prebuilt/kind")
+
+
+def test_get_deployer_noop(base_config):
+    deployer = get_deployer(
+        {"deployer": "noop"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, NoOpDeployer)
+    assert deployer.cluster_name == base_config["cluster_name"]
+    assert deployer.project_id == base_config["project_id"]
+
+
+def test_get_deployer_no_infra_env_precedence(mocker, base_config):
+    # BENCH_NO_INFRA wins even when a tofu deployer/stack is configured.
+    mocker.patch.dict(os.environ, {"BENCH_NO_INFRA": "true"})
+    deployer = get_deployer(
+        {"deployer": "tofu", "stack": "prebuilt/kind"},
+        base_config["project_id"],
+        base_config["cluster_name"],
+        base_config["location"],
+    )
+    assert isinstance(deployer, NoOpDeployer)
+    assert deployer.cluster_name == base_config["cluster_name"]
+    assert deployer.project_id == base_config["project_id"]

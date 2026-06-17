@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from devops_bench.core import Registry, get_env
+from devops_bench.core import ConfigError, Registry, get_bool, get_env
 from devops_bench.deployers.base import Deployer
 
 __all__ = ["DEPLOYERS", "get_deployer"]
@@ -39,9 +39,11 @@ def get_deployer(
 ) -> Deployer:
     """Instantiate the deployer selected by task config and environment.
 
-    Deployer type precedence: ``infra_config["deployer"]`` → ``CLOUD_PROVIDER``
-    env (when ``tofu``/``gcp``) → ``"tofu"``. Location precedence: ``global_location``
-    arg → ``GCP_LOCATION`` env → ``us-central1-a``.
+    OpenTofu (``tofu``) is the sole provisioning engine; the provider (``gcp`` or
+    ``kind``) only selects which variable resolver fills the stack defaults. Set
+    ``BENCH_NO_INFRA=true`` or ``deployer: noop`` to skip provisioning entirely;
+    ``BENCH_NO_INFRA`` takes precedence over any task config. Location precedence:
+    ``global_location`` arg → ``GCP_LOCATION`` env → ``us-central1-a``.
 
     Args:
         infra_config: Task infrastructure config (``deployer``, ``stack``,
@@ -52,9 +54,27 @@ def get_deployer(
 
     Returns:
         A configured :class:`~devops_bench.deployers.base.Deployer`.
+
+    Raises:
+        ConfigError: If ``infra_config["deployer"]`` is set to anything other
+            than ``tofu`` or ``noop``.
     """
-    # Concrete engines are imported here so importing this module stays light.
-    from devops_bench.deployers.gcp import GCPDeployer
+    deployer_type = (infra_config.get("deployer") or "").lower()
+
+    if get_bool("BENCH_NO_INFRA") or deployer_type == "noop":
+        # Imported lazily to keep package import light.
+        from devops_bench.deployers.noop import NoOpDeployer
+
+        return NoOpDeployer(cluster_name=global_cluster_name, project_id=global_project_id)
+
+    if deployer_type and deployer_type != "tofu":
+        raise ConfigError(
+            f"unsupported deployer {deployer_type!r}; use 'tofu', or 'noop' / "
+            "BENCH_NO_INFRA=true to skip infra"
+        )
+
+    # Concrete engine and resolvers are imported here so importing this module
+    # stays light.
     from devops_bench.deployers.gcp import resolve_variables as resolve_gcp_vars
     from devops_bench.deployers.kind import resolve_variables as resolve_kind_vars
     from devops_bench.deployers.tofu import TFDeployer
@@ -63,26 +83,14 @@ def get_deployer(
         DEPLOYERS.register("gcp")(resolve_gcp_vars)
         DEPLOYERS.register("kind")(resolve_kind_vars)
 
-    cloud_provider = (get_env("CLOUD_PROVIDER", "") or "").lower()
-    deployer_type = infra_config.get("deployer")
-    if not deployer_type:
-        deployer_type = cloud_provider if cloud_provider in ("tofu", "gcp") else "tofu"
-
     location = global_location or get_env("GCP_LOCATION", _DEFAULT_LOCATION)
+    stack = infra_config.get("stack") or _DEFAULT_STACK
+    variables = infra_config.get("variables", {})
 
-    if deployer_type == "tofu":
-        stack = infra_config.get("stack") or _DEFAULT_STACK
-        variables = infra_config.get("variables", {})
+    cloud_provider = (get_env("CLOUD_PROVIDER", "") or "").lower()
+    provider = cloud_provider or ("kind" if "kind" in stack else "gcp")
+    if provider in DEPLOYERS:
+        resolver = DEPLOYERS.get(provider)
+        variables = resolver(stack, variables, global_project_id, global_cluster_name, location)
 
-        provider = cloud_provider or ("kind" if "kind" in stack else "gcp")
-        if provider in DEPLOYERS:
-            resolver = DEPLOYERS.get(provider)
-            variables = resolver(stack, variables, global_project_id, global_cluster_name, location)
-
-        return TFDeployer(tf_dir=stack, variables=variables)
-
-    return GCPDeployer(
-        project=global_project_id,
-        location=location,
-        cluster_name=global_cluster_name,
-    )
+    return TFDeployer(tf_dir=stack, variables=variables)

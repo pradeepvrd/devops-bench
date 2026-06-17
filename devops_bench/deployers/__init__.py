@@ -15,6 +15,6 @@
 """Infrastructure deployers for provisioning benchmark clusters.
 
 Concrete engine classes (:class:`~devops_bench.deployers.tofu.TFDeployer`,
-:class:`~devops_bench.deployers.gcp.GCPDeployer`) are imported lazily by
+:class:`~devops_bench.deployers.noop.NoOpDeployer`) are imported lazily by
 :func:`~devops_bench.deployers.factory.get_deployer` to keep package import light.
 """
