@@ -60,6 +60,23 @@ def _sort_key(task: Task) -> tuple[int, int | str]:
     return (0, int(text)) if text.isdigit() else (1, text)
 
 
+def _load_yaml_task(path: str, name_default: str) -> Task | None:
+    """Read one YAML spec file into a Task, or None if it is not a mapping.
+
+    Args:
+        path: Path to the YAML spec file.
+        name_default: Fallback name used when the spec omits one.
+
+    Returns:
+        The parsed task, or ``None`` when the document is not a mapping.
+    """
+    with open(path) as stream:
+        content = safe_parse_yaml(stream.read())
+    if not isinstance(content, dict):
+        return None
+    return Task.from_dict(content, name_default=name_default)
+
+
 def load_from_tasks_dir(dir_path: str) -> list[Task]:
     """Recursively load every ``task.yaml`` under a tasks directory.
 
@@ -88,12 +105,9 @@ def load_from_tasks_dir(dir_path: str) -> list[Task]:
 
         yaml_path = os.path.join(root, _TASK_FILE)
         try:
-            with open(yaml_path) as stream:
-                yaml_text = stream.read()
-            content = safe_parse_yaml(yaml_text)
-            if not isinstance(content, dict):
-                continue
-            tasks.append(Task.from_dict(content, name_default=os.path.basename(root)))
+            task = _load_yaml_task(yaml_path, name_default=os.path.basename(root))
+            if task is not None:
+                tasks.append(task)
         except Exception as exc:
             _log.warning("Failed to read task spec in %s: %s", yaml_path, exc)
 
@@ -117,12 +131,8 @@ def _load_single_file(path: str) -> list[Task]:
     name_default = os.path.splitext(os.path.basename(path))[0]
 
     if path.endswith((".yaml", ".yml")):
-        with open(path) as f:
-            yaml_text = f.read()
-        content = safe_parse_yaml(yaml_text)
-        if not isinstance(content, dict):
-            return []
-        return [Task.from_dict(content, name_default=name_default)]
+        task = _load_yaml_task(path, name_default=name_default)
+        return [task] if task is not None else []
 
     with open(path) as f:
         raw = json.load(f)
