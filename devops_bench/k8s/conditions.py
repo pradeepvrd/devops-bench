@@ -12,17 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Wait/poll engine and readiness predicates for Kubernetes resources."""
+"""Generic wait/poll engine for Kubernetes resources."""
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from typing import Any
 
 __all__ = [
-    "all_pods_running",
-    "deployment_ready",
     "poll_until",
 ]
 
@@ -63,30 +60,3 @@ def poll_until(
         delay = min(delay * 2, max_delay)
     # One last check in case the predicate became true during the final sleep.
     return predicate()
-
-
-def all_pods_running(pods_json: dict[str, Any]) -> bool:
-    """Report whether every pod in a ``kubectl get pods -o json`` result is Running.
-
-    Args:
-        pods_json: Parsed JSON document with an ``items`` list of pods.
-
-    Returns:
-        True if there is at least one pod and all are in phase ``Running``.
-    """
-    items = pods_json.get("items", [])
-    return len(items) > 0 and all(pod.get("status", {}).get("phase") == "Running" for pod in items)
-
-
-def deployment_ready(dep_json: dict[str, Any], min_replicas: int) -> bool:
-    """Report whether a deployment has at least ``min_replicas`` ready replicas.
-
-    Args:
-        dep_json: Parsed JSON of a ``kubectl get deployment -o json`` result.
-        min_replicas: Minimum number of ready replicas required.
-
-    Returns:
-        True if ``status.readyReplicas`` is at least ``min_replicas``.
-    """
-    ready_replicas = dep_json.get("status", {}).get("readyReplicas", 0)
-    return ready_replicas >= min_replicas
