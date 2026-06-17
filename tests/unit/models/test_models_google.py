@@ -172,3 +172,39 @@ def test_generate_content_invokes_sdk(mocker):
     kwargs = generate.await_args.kwargs
     assert kwargs["model"] == adapter.model_name
     assert kwargs["contents"]  # converted gemini messages
+
+
+def test_generate_content_includes_system_instruction(mocker):
+    client = mocker.patch.object(google.genai, "Client").return_value
+    captured: dict = {}
+
+    def fake_config(**config_args):
+        captured.update(config_args)
+        return SimpleNamespace(**config_args)
+
+    mocker.patch.object(google.types, "GenerateContentConfig", side_effect=fake_config)
+    client.aio.models.generate_content = AsyncMock(return_value="resp")
+
+    adapter = GeminiClientAdapter()
+    asyncio.run(
+        adapter.generate_content([{"role": "user", "content": "hello"}], None, "be helpful")
+    )
+
+    assert captured["system_instruction"] == "be helpful"
+
+
+def test_generate_content_omits_system_instruction_when_none(mocker):
+    client = mocker.patch.object(google.genai, "Client").return_value
+    captured: dict = {}
+
+    def fake_config(**config_args):
+        captured.update(config_args)
+        return SimpleNamespace(**config_args)
+
+    mocker.patch.object(google.types, "GenerateContentConfig", side_effect=fake_config)
+    client.aio.models.generate_content = AsyncMock(return_value="resp")
+
+    adapter = GeminiClientAdapter()
+    asyncio.run(adapter.generate_content([{"role": "user", "content": "hello"}], None, None))
+
+    assert "system_instruction" not in captured

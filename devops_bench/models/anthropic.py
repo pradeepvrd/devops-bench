@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from devops_bench.core.config import get_env
+from devops_bench.core.config import get_env, get_int
 from devops_bench.core.errors import MissingDependencyError
 from devops_bench.core.logging import get_logger
 from devops_bench.models.base import MODELS, LLMClient
@@ -30,7 +30,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without the SDK
 
 __all__ = ["AnthropicClientAdapter"]
 
-_MAX_TOKENS = 4096
+_DEFAULT_MAX_TOKENS = 16000
 
 _log = get_logger("models.anthropic")
 
@@ -41,9 +41,14 @@ class AnthropicClientAdapter(LLMClient):
 
     Targets Claude models served through Vertex AI; the region and project are
     read from ``GCP_VERTEX_LOCATION`` and ``GCP_PROJECT_ID``.
+
+    Args:
+        model_name: Model override; falls back to ``AGENT_MODEL`` when omitted.
+        max_tokens: Per-response output token cap; falls back to
+            ``AGENT_MAX_TOKENS`` and then a sane default when omitted.
     """
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(self, model_name: str | None = None, max_tokens: int | None = None) -> None:
         project_id = get_env("GCP_PROJECT_ID")
         location = get_env("GCP_VERTEX_LOCATION", "us-central1")
 
@@ -58,6 +63,7 @@ class AnthropicClientAdapter(LLMClient):
 
         self.client = AsyncAnthropicVertex(region=location, project_id=project_id)
         self.model_name = model_name
+        self.max_tokens = max_tokens or get_int("AGENT_MAX_TOKENS", _DEFAULT_MAX_TOKENS)
 
     async def generate_content(
         self,
@@ -68,10 +74,11 @@ class AnthropicClientAdapter(LLMClient):
         messages = self._convert_to_anthropic_messages(contents)
         kwargs: dict[str, Any] = {
             "model": self.model_name,
-            "max_tokens": _MAX_TOKENS,
+            "max_tokens": self.max_tokens,
             "messages": messages,
-            "tools": tools,
         }
+        if tools:
+            kwargs["tools"] = tools
         if system_instruction:
             kwargs["system"] = system_instruction
         return await self.client.messages.create(**kwargs)

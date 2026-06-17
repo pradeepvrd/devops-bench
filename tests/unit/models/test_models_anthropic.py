@@ -111,6 +111,7 @@ def test_generate_content_passes_max_tokens_and_system(mocker):
     client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
+    mocker.patch.dict(os.environ, {}, clear=True)
 
     adapter = AnthropicClientAdapter()
     tools = adapter.format_tools([_make_tool("t", "d", {"type": "object"})])
@@ -122,11 +123,49 @@ def test_generate_content_passes_max_tokens_and_system(mocker):
     assert result == "resp"
     create.assert_awaited_once()
     kwargs = create.await_args.kwargs
-    assert kwargs["max_tokens"] == 4096
+    assert kwargs["max_tokens"] == 16000
     assert kwargs["model"] == adapter.model_name
     assert kwargs["system"] == "be helpful"
     assert kwargs["messages"] == [{"role": "user", "content": "hello"}]
     assert kwargs["tools"] == tools
+
+
+def test_generate_content_default_max_tokens(mocker):
+    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    create = AsyncMock(return_value="resp")
+    client.messages.create = create
+    mocker.patch.dict(os.environ, {}, clear=True)
+
+    adapter = AnthropicClientAdapter()
+    asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
+
+    assert create.await_args.kwargs["max_tokens"] == 16000
+
+
+def test_generate_content_env_overrides_max_tokens(mocker):
+    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    create = AsyncMock(return_value="resp")
+    client.messages.create = create
+    mocker.patch.dict(os.environ, {"AGENT_MAX_TOKENS": "12345"}, clear=True)
+
+    adapter = AnthropicClientAdapter()
+    asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
+
+    assert adapter.max_tokens == 12345
+    assert create.await_args.kwargs["max_tokens"] == 12345
+
+
+def test_generate_content_arg_overrides_env_max_tokens(mocker):
+    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    create = AsyncMock(return_value="resp")
+    client.messages.create = create
+    mocker.patch.dict(os.environ, {"AGENT_MAX_TOKENS": "12345"}, clear=True)
+
+    adapter = AnthropicClientAdapter(max_tokens=999)
+    asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
+
+    assert adapter.max_tokens == 999
+    assert create.await_args.kwargs["max_tokens"] == 999
 
 
 def test_generate_content_omits_system_when_empty(mocker):
@@ -138,6 +177,17 @@ def test_generate_content_omits_system_when_empty(mocker):
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert "system" not in create.await_args.kwargs
+
+
+def test_generate_content_omits_tools_when_empty(mocker):
+    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    create = AsyncMock(return_value="resp")
+    client.messages.create = create
+
+    adapter = AnthropicClientAdapter()
+    asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], "sys"))
+
+    assert "tools" not in create.await_args.kwargs
 
 
 def test_convert_messages_tool_calls_and_results(mocker):

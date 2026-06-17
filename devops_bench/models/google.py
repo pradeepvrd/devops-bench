@@ -154,7 +154,9 @@ class GeminiClientAdapter(LLMClient):
     ) -> Any:
         gemini_contents = self._convert_to_gemini_messages(contents)
 
-        config_args: dict[str, Any] = {"system_instruction": system_instruction}
+        config_args: dict[str, Any] = {}
+        if system_instruction is not None:
+            config_args["system_instruction"] = system_instruction
         if tools and hasattr(tools, "function_declarations") and tools.function_declarations:
             config_args["tools"] = [tools]
 
