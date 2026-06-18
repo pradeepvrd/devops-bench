@@ -133,6 +133,28 @@ def test_enter_empty_server_path_raises(mocker):
         asyncio.run(client.__aenter__())
 
 
+def test_lifecycle_connect_use_and_cleanup(mocker):
+    state = _install_fake_mcp_sdk(mocker)
+    # call_tool lazily imports @observe; make it an identity decorator.
+    mocker.patch("deepeval.tracing.observe", lambda *a, **k: (lambda fn: fn))
+
+    async def _exercise():
+        async with mcp_mod.MCPClient("mcp-server") as client:
+            # __aenter__ connected: session is set and initialized.
+            assert client.session is state["session"]
+            assert state["initialized"] is True
+            assert state["captured"] == {"command": "mcp-server", "args": []}
+
+            assert await client.list_tools() == "tools-result"
+            assert await client.call_tool("do", {"x": 1}) == "called do with {'x': 1}"
+
+    asyncio.run(_exercise())
+
+    # __aexit__ closed the session and the stdio transport via the exit stack.
+    assert state["session_closed"] is True
+    assert state["transport_closed"] is True
+
+
 def test_list_tools_delegates_to_session():
     client = mcp_mod.MCPClient("server")
 
