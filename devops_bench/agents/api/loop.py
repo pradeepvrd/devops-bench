@@ -105,6 +105,23 @@ class _ToolInfo:
         self.inputSchema = inputSchema
 
 
+def _read_skill_file(file_path: str) -> str:
+    """Read a skill file's contents, returning an error string on failure.
+
+    Args:
+        file_path: Path to the skill file to read.
+
+    Returns:
+        The file contents, or an ``Error reading skill file ...`` message when the
+        file cannot be read.
+    """
+    try:
+        with open(file_path) as f:
+            return f.read()
+    except OSError as exc:
+        return f"Error reading skill file {file_path}: {exc}"
+
+
 def _extract_tool_text(tool_result: Any) -> str:
     """Aggregate the text of every content block in an MCP tool result.
 
@@ -122,6 +139,45 @@ def _extract_tool_text(tool_result: Any) -> str:
         if texts:
             return "\n".join(texts)
     return str(tool_result)
+
+
+def _discover_skill_tools() -> tuple[list[_ToolInfo], dict[str, str], list[str]]:
+    """Discover local skills under :data:`_SKILLS_DIR` and build tool descriptors.
+
+    Walks the skills directory for ``SKILL.md`` files and parses their
+    frontmatter. This performs blocking filesystem I/O and is intended to be run
+    via :func:`asyncio.to_thread` from the async loop.
+
+    Returns:
+        A ``(tools, skill_resources, loaded_skills)`` tuple: synthetic
+        :class:`_ToolInfo` descriptors, a map of normalized tool name to skill
+        file path, and the discovered skill names. All are empty when the skills
+        directory is absent.
+    """
+    tools: list[_ToolInfo] = []
+    skill_resources: dict[str, str] = {}
+    loaded_skills: list[str] = []
+
+    if not os.path.exists(_SKILLS_DIR):
+        _log.warning("Skills directory not found: %s", _SKILLS_DIR)
+        return tools, skill_resources, loaded_skills
+
+    skill_files = glob.glob(os.path.join(_SKILLS_DIR, "**", "SKILL.md"), recursive=True)
+    for file_path in skill_files:
+        skill_name, description, _ = parse_skill_md(file_path)
+        if skill_name:
+            normalized_name = "skill_" + skill_name.replace("-", "_")
+            tools.append(
+                _ToolInfo(
+                    name=normalized_name,
+                    description=description or f"Exposes skill: {skill_name}",
+                )
+            )
+            skill_resources[normalized_name] = file_path
+            loaded_skills.append(skill_name)
+            _log.info("Loaded local skill as tool: %s -> %s", normalized_name, file_path)
+
+    return tools, skill_resources, loaded_skills
 
 
 async def process_query(
@@ -171,11 +227,8 @@ async def process_query(
             if name in skill_resources:
                 file_path = skill_resources[name]
                 _log.info("Calling skill tool %s for file %s", name, file_path)
-                try:
-                    with open(file_path) as f:
-                        result_text = f.read()
-                except OSError as exc:
-                    result_text = f"Error reading skill file {file_path}: {exc}"
+                # Offload the blocking file read so it does not stall the loop.
+                result_text = await asyncio.to_thread(_read_skill_file, file_path)
             elif mcp_client is None:
                 result_text = "Error: MCP client is not initialized; no tools are available."
             else:
@@ -368,29 +421,13 @@ async def run_api_agent(
             tools = list(tools_result.tools)
 
             # Load local skills from the gke-mcp repo and expose them as tools.
-            mcp_client.skill_resources = {}
-            loaded_skills: list[str] = []
-            if os.path.exists(_SKILLS_DIR):
-                skill_files = glob.glob(
-                    os.path.join(_SKILLS_DIR, "**", "SKILL.md"), recursive=True
-                )
-                for file_path in skill_files:
-                    skill_name, description, _ = parse_skill_md(file_path)
-                    if skill_name:
-                        normalized_name = "skill_" + skill_name.replace("-", "_")
-                        tools.append(
-                            _ToolInfo(
-                                name=normalized_name,
-                                description=description or f"Exposes skill: {skill_name}",
-                            )
-                        )
-                        mcp_client.skill_resources[normalized_name] = file_path
-                        loaded_skills.append(skill_name)
-                        _log.info(
-                            "Loaded local skill as tool: %s -> %s", normalized_name, file_path
-                        )
-            else:
-                _log.warning("Skills directory not found: %s", _SKILLS_DIR)
+            # The discovery walks the filesystem and parses files, so it is
+            # offloaded to a worker thread to keep the event loop responsive.
+            skill_tools, skill_resources, loaded_skills = await asyncio.to_thread(
+                _discover_skill_tools
+            )
+            tools.extend(skill_tools)
+            mcp_client.skill_resources = skill_resources
 
             return await _run_agent_loop(
                 goal,
