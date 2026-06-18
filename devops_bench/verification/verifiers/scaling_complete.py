@@ -103,7 +103,8 @@ class ScalingCompleteVerifier(BaseVerifier):
             _log.warning("Failed to parse deployment JSON for %s", self.deployment)
             return False, {"reason": "Failed to parse deployment JSON"}
 
-        ready_replicas = dep_data.get("status", {}).get("readyReplicas", 0)
+        # ``status`` may be explicitly null before the controller populates it.
+        ready_replicas = (dep_data.get("status") or {}).get("readyReplicas", 0)
         success = ready_replicas >= self.min_replicas
         if success:
             reason = (

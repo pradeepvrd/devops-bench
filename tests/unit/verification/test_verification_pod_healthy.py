@@ -64,6 +64,15 @@ def test_check_pods_status_failure(mocker):
     assert verifier._check_pods_status(details) is False
 
 
+def test_check_pods_status_handles_null_status():
+    # A pod whose "status" is explicitly null must not crash the check; it
+    # counts as not-Running, so the overall check fails rather than raising.
+    verifier = PodHealthyVerifier(selector="app=my-app")
+    details = {"items": [{"status": None}, {"status": {"phase": "Running"}}]}
+
+    assert verifier._check_pods_status(details) is False
+
+
 def test_verify_wait_success(mocker):
     mocker.patch(
         "devops_bench.verification.verifiers.pod_healthy.wait",

@@ -96,3 +96,65 @@ def test_compound_list_aggregates_in_order(mocker):
     assert "spec[1] failed" in result.reason
     assert isinstance(result.details, list)
     assert len(result.details) == 2
+
+
+def test_remaining_can_go_non_positive(mocker):
+    # _remaining no longer clamps to 1: once the budget is spent it returns <= 0
+    # so callers can short-circuit instead of borrowing another second.
+    mocker.patch("devops_bench.verification.runner.time.time", return_value=150.0)
+    assert VerifierAgent._remaining(start_time=100.0, timeout_sec=30) == -20
+
+
+def test_compound_list_aborts_remaining_members_when_budget_exhausted(mocker):
+    # Clock: start at 0, then the first member's _remaining sees 1s elapsed (ok),
+    # and every subsequent reading is past the 5s budget so members 2+ are
+    # skipped without their verify() ever running.
+    times = iter([0.0, 1.0, 99.0, 99.0, 99.0, 99.0])
+    mocker.patch(
+        "devops_bench.verification.runner.time.time",
+        side_effect=lambda: next(times),
+    )
+    pod_verify = mocker.patch.object(PodHealthyVerifier, "verify", return_value=_ok())
+    scaling_verify = mocker.patch.object(ScalingCompleteVerifier, "verify", return_value=_ok())
+
+    spec = [
+        {"type": "pod_healthy", "selector": "app=my-app"},
+        {"type": "scaling_complete", "deployment": "my-dep", "min_replicas": 2},
+    ]
+    result = VerifierAgent().wait_for_condition(spec, timeout_sec=5)
+
+    # First member ran and passed; second was never invoked and is timed out.
+    assert pod_verify.call_count == 1
+    assert scaling_verify.call_count == 0
+    assert result.success is False
+    assert "spec[0] succeeded" in result.reason
+    assert "spec[1] failed: timed out" in result.reason
+    assert len(result.details) == 2
+    assert result.details[1].success is False
+
+
+def test_compound_dict_aborts_remaining_members_when_budget_exhausted(mocker):
+    times = iter([0.0, 1.0, 99.0, 99.0, 99.0, 99.0])
+    mocker.patch(
+        "devops_bench.verification.runner.time.time",
+        side_effect=lambda: next(times),
+    )
+    pod_verify = mocker.patch.object(PodHealthyVerifier, "verify", return_value=_ok())
+    scaling_verify = mocker.patch.object(ScalingCompleteVerifier, "verify", return_value=_ok())
+
+    spec = {
+        "pod_spec": {"type": "pod_healthy", "selector": "app=my-app"},
+        "scaling_spec": {
+            "type": "scaling_complete",
+            "deployment": "my-dep",
+            "min_replicas": 2,
+        },
+    }
+    result = VerifierAgent().wait_for_condition(spec, timeout_sec=5)
+
+    assert pod_verify.call_count == 1
+    assert scaling_verify.call_count == 0
+    assert result.success is False
+    assert "pod_spec succeeded" in result.reason
+    assert "scaling_spec failed: timed out" in result.reason
+    assert result.details["scaling_spec"].success is False
