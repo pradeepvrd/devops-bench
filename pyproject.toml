@@ -55,6 +55,9 @@ path = "devops_bench/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["devops_bench"]
+# Ship the judge skill markdown as package data so it resolves under
+# ``pip install`` (loaded via importlib.resources in metrics._skills).
+artifacts = ["devops_bench/skills/*.md"]
 
 [dependency-groups]
 # pytest-mock is carried over from requirements.txt; pytest, ruff, and

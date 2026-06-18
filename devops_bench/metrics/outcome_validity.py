@@ -16,12 +16,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from deepeval.metrics import GEval
 from deepeval.test_case import SingleTurnParams
 
 from devops_bench.core import get_logger
+from devops_bench.metrics._skills import load_skill_text
 
 __all__ = ["OUTCOME_SKILL_FILENAME", "load_outcome_criteria", "build_outcome_validity_metric"]
 
@@ -29,23 +28,17 @@ OUTCOME_SKILL_FILENAME = "outcome-validity-checklist.md"
 
 _log = get_logger("metrics.outcome_validity")
 
-# parents: [0]=metrics, [1]=devops_bench, [2]=repo root.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 def load_outcome_criteria() -> str:
-    """Read the outcome-validity checklist skill from the repo ``skills`` dir.
+    """Read the outcome-validity checklist skill packaged with the project.
 
     Returns:
         The full markdown text used as the GEval criteria.
 
     Raises:
-        FileNotFoundError: If the skill file is missing.
+        FileNotFoundError: If the packaged skill file is missing.
     """
-    path = _REPO_ROOT / "skills" / OUTCOME_SKILL_FILENAME
-    if not path.is_file():
-        raise FileNotFoundError(f"Outcome validity skill not found at {path}")
-    return path.read_text()
+    return load_skill_text(OUTCOME_SKILL_FILENAME)
 
 
 def build_outcome_validity_metric(model) -> GEval:
