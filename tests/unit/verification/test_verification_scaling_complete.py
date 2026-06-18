@@ -76,6 +76,20 @@ def test_check_scaling_get_failure(mocker):
     assert "Failed to get deployment" in details["reason"]
 
 
+def test_check_scaling_forwards_kubeconfig(mocker):
+    mock_get = mocker.patch(
+        "devops_bench.verification.verifiers.scaling_complete.get_json",
+        return_value={"status": {"readyReplicas": 1}},
+    )
+
+    verifier = ScalingCompleteVerifier(
+        deployment="my-dep", min_replicas=1, kubeconfig="/tmp/kc.yaml"
+    )
+    verifier._check_scaling()
+
+    assert mock_get.call_args.kwargs["kubeconfig"] == "/tmp/kc.yaml"
+
+
 def test_verify_polling_succeeds_on_first_check(mocker):
     # A first-pass success returns immediately with no backoff sleep, so the
     # verifier formats the "Scaling complete" result from the real poll_until.

@@ -45,7 +45,7 @@ class PodHealthyVerifier(BaseVerifier):
     selector: str
     namespace: str | None = None
 
-    def verify(self, timeout_sec: int) -> VerificationResult:
+    def verify(self, timeout_sec: float) -> VerificationResult:
         """Wait for the selected pods to become Ready.
 
         Args:
@@ -63,6 +63,7 @@ class PodHealthyVerifier(BaseVerifier):
                 for_condition="condition=Ready",
                 timeout_sec=timeout_sec,
                 namespace=self.namespace,
+                kubeconfig=self.kubeconfig,
             )
             return VerificationResult(
                 success=True,
@@ -97,6 +98,7 @@ class PodHealthyVerifier(BaseVerifier):
                 "pods",
                 selector=self.selector,
                 namespace=self.namespace,
+                kubeconfig=self.kubeconfig,
             )
         except Exception as exc:  # noqa: BLE001 - diagnostics path, never raises
             _log.warning("Failed to fetch pod details for selector %s: %s", self.selector, exc)
