@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from deepeval.models import DeepEvalBaseLLM
 
@@ -86,8 +87,11 @@ class ModelLayerJudge(DeepEvalBaseLLM):
     def generate(self, prompt: str) -> str:
         """Generate judge text for ``prompt`` synchronously.
 
-        Runs the async :meth:`a_generate` to completion. Must not be called from
-        within a running event loop.
+        Runs the async :meth:`a_generate` to completion. This is loop-aware: when
+        called from outside an event loop it uses :func:`asyncio.run`; when an
+        event loop is already running on the calling thread (``asyncio.run`` would
+        raise there) it runs the coroutine on a separate worker thread and blocks
+        for the result.
 
         Args:
             prompt: The fully rendered judge prompt.
@@ -95,7 +99,15 @@ class ModelLayerJudge(DeepEvalBaseLLM):
         Returns:
             The model's text response, or an empty string when none was produced.
         """
-        return asyncio.run(self.a_generate(prompt))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.a_generate(prompt))
+
+        # A loop is already running on this thread; offload to a worker thread
+        # that owns its own loop so we never call asyncio.run() re-entrantly.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(self.a_generate(prompt))).result()
 
     def get_model_name(self) -> str:
         """Return the configured judge model name (DeepEval contract)."""

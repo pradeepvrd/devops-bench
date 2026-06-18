@@ -51,16 +51,21 @@ def calculate_doc_retrieval_rate(
 
     accessed_docs = set()
     for doc in documentation:
-        doc_name_lower = doc["doc_name"].lower()
-        url_lower = doc["url"].lower()
+        doc_name = doc.get("doc_name") or ""
+        doc_name_lower = doc_name.lower()
+        url_lower = (doc.get("url") or "").lower()
         found_in_trajectory = False
         for step in trajectory:
             step_str = json.dumps(step).lower()
-            if doc_name_lower in step_str or (url_lower and url_lower in step_str):
+            # Guard both substrings on truthiness so a missing name/url (now "")
+            # does not spuriously match every step (``"" in s`` is always True).
+            if (doc_name_lower and doc_name_lower in step_str) or (
+                url_lower and url_lower in step_str
+            ):
                 found_in_trajectory = True
                 break
         if found_in_trajectory:
-            accessed_docs.add(doc["doc_name"])
+            accessed_docs.add(doc_name)
 
     return len(accessed_docs) / len(documentation) if len(documentation) > 0 else 0.0
 
@@ -85,24 +90,26 @@ def evaluate_documentation_grounding(
         judge_model: A ``DeepEvalBaseLLM`` judge model.
         scores: Mutable scores dict updated in place.
     """
-    doc_metrics = []
+    # Deduplicate constraints by text first so two guides sharing the same
+    # constraint produce a single metric; otherwise total > unique and a
+    # perfect 5.0 (applied == total) becomes unreachable.
     doc_constraints_map: dict[str, bool] = {}
     for doc in documentation:
         for constraint in doc.get("constraints", []):
-            c_text = constraint["text"]
-            c_crit = constraint["critical"]
-            doc_constraints_map[c_text] = c_crit
-            doc_metrics.append(
-                GEval(
-                    name=f"Doc Constraint: {c_text}",
-                    criteria=(
-                        "Verify that the actual output fulfills this specific"
-                        f" documentation constraint/requirement: {c_text}"
-                    ),
-                    evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
-                    model=judge_model,
-                )
-            )
+            doc_constraints_map[constraint["text"]] = constraint["critical"]
+
+    doc_metrics = [
+        GEval(
+            name=f"Doc Constraint: {c_text}",
+            criteria=(
+                "Verify that the actual output fulfills this specific"
+                f" documentation constraint/requirement: {c_text}"
+            ),
+            evaluation_params=[SingleTurnParams.ACTUAL_OUTPUT],
+            model=judge_model,
+        )
+        for c_text in doc_constraints_map
+    ]
 
     if not doc_metrics:
         return

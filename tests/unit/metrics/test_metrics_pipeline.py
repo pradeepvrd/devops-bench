@@ -64,6 +64,12 @@ def test_checklist_empty_when_no_bullets():
     assert extract_checklist_items("Some prose without bullets", use_mcp=True) == []
 
 
+def test_checklist_preserves_trailing_hyphen():
+    # lstrip("- ") must not eat a trailing hyphen the way strip("- ") would.
+    expected = "Critical Requirements:\n- Deploy to namespace staging-\n"
+    assert extract_checklist_items(expected, use_mcp=True) == ["Deploy to namespace staging-"]
+
+
 # --- evaluate_metrics_batch (deepeval mocked) ---------------------------------
 
 
@@ -71,6 +77,31 @@ def _metric_result(name, score=1.0, success=True, reason="ok"):
     metric_data = SimpleNamespace(name=name, score=score, success=success, reason=reason)
     test_result = SimpleNamespace(metrics_data=[metric_data])
     return SimpleNamespace(test_results=[test_result])
+
+
+def _evaluate_by_metric_name(successes=None):
+    """Build an order-agnostic ``evaluate`` side effect.
+
+    The pipeline always calls ``evaluate([tc], metrics=[m])`` with a single
+    metric, so the result is derived from that metric's real ``name`` rather than
+    call order. The reported name carries DeepEval's ``" [GEval]"`` suffix so the
+    test actually exercises the suffix stripping. ``successes`` optionally maps a
+    metric name (pre-suffix) to its success bool (default True).
+
+    Args:
+        successes: Optional ``{metric_name: success_bool}`` overrides.
+
+    Returns:
+        A callable suitable for ``evaluate``'s ``side_effect``.
+    """
+    successes = successes or {}
+
+    def _side_effect(test_cases, metrics):
+        metric = metrics[0]
+        name = metric.name
+        return _metric_result(f"{name} [GEval]", success=successes.get(name, True))
+
+    return _side_effect
 
 
 def _base_result(**overrides):
@@ -90,17 +121,20 @@ def _base_result(**overrides):
 
 def test_batch_scores_outcome_and_tool(mocker):
     mocker.patch.object(pipeline, "get_bool", return_value=True)
-    mocker.patch.object(pipeline, "build_outcome_validity_metric", return_value=MagicMock())
-    mocker.patch.object(pipeline, "build_tool_invocation_metric", return_value=MagicMock())
-    mocker.patch.object(pipeline, "LLMTestCase")
     mocker.patch.object(
         pipeline,
-        "evaluate",
-        side_effect=[
-            _metric_result("OutcomeValidity"),
-            _metric_result("ToolInvocation"),
-        ],
+        "build_outcome_validity_metric",
+        return_value=SimpleNamespace(name="OutcomeValidity"),
     )
+    mocker.patch.object(
+        pipeline,
+        "build_tool_invocation_metric",
+        return_value=SimpleNamespace(name="ToolInvocation"),
+    )
+    mocker.patch.object(pipeline, "LLMTestCase")
+    # Order-agnostic: result is keyed off the metric name, and the reported name
+    # carries DeepEval's " [GEval]" suffix so the strip is actually exercised.
+    mocker.patch.object(pipeline, "evaluate", side_effect=_evaluate_by_metric_name())
     judge = MagicMock()
     results = [_base_result(expected_output="App deployed")]  # no bullets
 
@@ -109,16 +143,26 @@ def test_batch_scores_outcome_and_tool(mocker):
     scores = results[0]["scores"]
     assert "OutcomeValidity" in scores
     assert "ToolInvocation" in scores
+    assert "OutcomeValidity [GEval]" not in scores
+    assert "ToolInvocation [GEval]" not in scores
     assert "ChecklistScore" not in scores
 
 
 def test_batch_skips_tool_when_mcp_disabled(mocker):
     mocker.patch.object(pipeline, "get_bool", return_value=False)
-    mocker.patch.object(pipeline, "build_outcome_validity_metric", return_value=MagicMock())
-    mocker.patch.object(pipeline, "build_tool_invocation_metric", return_value=MagicMock())
+    mocker.patch.object(
+        pipeline,
+        "build_outcome_validity_metric",
+        return_value=SimpleNamespace(name="OutcomeValidity"),
+    )
+    mocker.patch.object(
+        pipeline,
+        "build_tool_invocation_metric",
+        return_value=SimpleNamespace(name="ToolInvocation"),
+    )
     mocker.patch.object(pipeline, "LLMTestCase")
     evaluate = mocker.patch.object(
-        pipeline, "evaluate", return_value=_metric_result("OutcomeValidity")
+        pipeline, "evaluate", side_effect=_evaluate_by_metric_name()
     )
     judge = MagicMock()
     results = [_base_result()]
@@ -127,6 +171,7 @@ def test_batch_skips_tool_when_mcp_disabled(mocker):
 
     # Only the outcome evaluation runs.
     assert evaluate.call_count == 1
+    assert "OutcomeValidity" in results[0]["scores"]
     assert "ToolInvocation" not in results[0]["scores"]
 
 

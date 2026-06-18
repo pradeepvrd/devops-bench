@@ -68,8 +68,10 @@ def extract_checklist_items(expected_output: str, use_mcp: bool) -> list[str]:
         )
         reqs_section = parts[0]
 
+    # Strip only the leading "- " bullet marker; ``str.strip("- ")`` would also
+    # eat trailing hyphens/spaces and corrupt items like "...staging-".
     raw_checklist_items = [
-        line.strip("- ")
+        line.lstrip("- ").strip()
         for line in reqs_section.split("\n")
         if line.strip().startswith("-")
     ]
@@ -82,18 +84,21 @@ def extract_checklist_items(expected_output: str, use_mcp: bool) -> list[str]:
     return checklist_items
 
 
-def _record_metrics(result: Any, scores: dict[str, Any], *, strip_geval: bool) -> None:
+def _record_metrics(result: Any, scores: dict[str, Any]) -> None:
     """Copy DeepEval metric results into ``scores`` in place.
+
+    A trailing ``" [GEval]"`` suffix (which DeepEval appends to GEval metric
+    names) is stripped uniformly so score keys are clean, e.g. ``OutcomeValidity``
+    rather than ``OutcomeValidity [GEval]``.
 
     Args:
         result: A DeepEval evaluation result with ``test_results``.
         scores: Mutable scores dict updated in place.
-        strip_geval: When true, drop a trailing ``" [GEval]"`` from metric names.
     """
     for test_result in result.test_results:
         for metric_data in test_result.metrics_data:
             name = metric_data.name
-            if strip_geval and name.endswith(" [GEval]"):
+            if name.endswith(" [GEval]"):
                 name = name[:-8]
             scores[name] = {
                 "score": metric_data.score,
@@ -184,11 +189,11 @@ def evaluate_metrics_batch(
         outcome_result = evaluate([outcome_test_case], metrics=[outcome_validity])
 
         scores: dict[str, Any] = {}
-        _record_metrics(outcome_result, scores, strip_geval=False)
+        _record_metrics(outcome_result, scores)
 
         if use_mcp:
             tool_result = evaluate([tool_test_case], metrics=[tool_invocation])
-            _record_metrics(tool_result, scores, strip_geval=False)
+            _record_metrics(tool_result, scores)
 
         if dynamic_metrics:
             _log.info(
@@ -198,7 +203,7 @@ def evaluate_metrics_batch(
                 try:
                     _log.info("Evaluating metric: %s...", m.name)
                     result = evaluate([all_test_case], metrics=[m])
-                    _record_metrics(result, scores, strip_geval=True)
+                    _record_metrics(result, scores)
                 except Exception as e:  # noqa: BLE001 - keep scoring the rest
                     _log.error("Error evaluating metric %s: %s", m.name, e)
 
