@@ -23,7 +23,7 @@ import time
 
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.cli.openclaw import run_openclaw_agent, run_openclaw_agent_local
-from devops_bench.core import SubprocessError, get_bool, get_env, get_logger
+from devops_bench.core import SubprocessError, first_env, get_bool, get_env, get_logger
 from devops_bench.core.subprocess import run
 
 __all__ = [
@@ -190,6 +190,10 @@ def extract_trajectory_from_session(session_id: str) -> dict:
                                 idx = parts.index("skills")
                                 if idx + 1 < len(parts):
                                     referenced_skills.append(parts[idx + 1])
+                            elif file_path.endswith("SKILL.md") and len(parts) >= 2:
+                                # No ``skills`` dir (e.g. /plugin/my-skill/SKILL.md):
+                                # the skill name is the SKILL.md's parent folder.
+                                referenced_skills.append(parts[-2])
     except OSError as exc:
         _log.warning("Failed to read session file: %s", exc)
 
@@ -332,20 +336,20 @@ def run_cli_agent(
 class GeminiCliAgent(AgentHarness):
     """Gemini CLI agent harness driving the ``gemini`` binary.
 
-    The binary path is read from ``AGENT_TARGET`` (or ``GEMINI_PATH``), defaulting
-    to ``gemini`` on ``PATH``. Provider and model selection flow from
+    The binary path is resolved with precedence ``AGENT_TARGET`` → ``GEMINI_PATH``
+    → ``"gemini"`` on ``PATH``. Provider and model selection flow from
     ``AGENT_PROVIDER``/``AGENT_MODEL`` via the env overlay, never hardcoded.
 
     Args:
         agent_target: Path to the ``gemini`` binary; when ``None`` it is resolved
-            from the environment.
+            from ``AGENT_TARGET``/``GEMINI_PATH`` (in that order), then ``"gemini"``.
         bench_use_mcp: Pre-approve the GKE MCP tools (``True``) or disable
             extensions (``False``).
     """
 
     def __init__(self, agent_target: str | None = None, bench_use_mcp: bool = True) -> None:
-        self.agent_target = agent_target or get_env("AGENT_TARGET") or get_env(
-            "GEMINI_PATH", "gemini"
+        self.agent_target = agent_target or first_env(
+            "AGENT_TARGET", "GEMINI_PATH", default="gemini"
         )
         self.bench_use_mcp = bench_use_mcp
 
