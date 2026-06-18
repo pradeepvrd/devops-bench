@@ -103,8 +103,12 @@ class PodHealthyVerifier(BaseVerifier):
             return {"error": str(exc)}
 
     def _check_pods_status(self, details: dict[str, Any]) -> bool:
-        """Return True when at least one pod matched and all are ``Running``."""
+        """Return True when at least one pod matched and all are ``Running``.
+
+        A pod whose ``status`` is explicitly ``null`` is treated as not Running
+        rather than crashing the check.
+        """
         items = details.get("items", [])
         return len(items) > 0 and all(
-            p.get("status", {}).get("phase") == "Running" for p in items
+            (p.get("status") or {}).get("phase") == "Running" for p in items
         )

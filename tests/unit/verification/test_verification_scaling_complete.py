@@ -48,6 +48,21 @@ def test_check_scaling_below_minimum(mocker):
     assert "Ready replicas (1) < min replicas (3)" in details["reason"]
 
 
+def test_check_scaling_handles_null_status(mocker):
+    # A freshly-created deployment may report "status": null before the
+    # controller populates it; treat readyReplicas as 0 instead of crashing.
+    mocker.patch(
+        "devops_bench.verification.verifiers.scaling_complete.get_json",
+        return_value={"status": None},
+    )
+
+    verifier = ScalingCompleteVerifier(deployment="my-dep", min_replicas=2)
+    success, details = verifier._check_scaling()
+
+    assert success is False
+    assert "Ready replicas (0) < min replicas (2)" in details["reason"]
+
+
 def test_check_scaling_get_failure(mocker):
     mocker.patch(
         "devops_bench.verification.verifiers.scaling_complete.get_json",
