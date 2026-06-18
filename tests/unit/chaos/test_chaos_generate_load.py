@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from types import SimpleNamespace
 
@@ -41,8 +42,9 @@ def test_run_chaos_command_splits_argv_and_returns_output(mocker):
     cmd = "~/go/bin/fortio load -qps 100 -t 10s -c 2 http://localhost:8080"
     result = run_chaos_command(cmd)
 
+    fortio = os.path.expanduser("~/go/bin/fortio")
     mock_run.assert_called_once_with(
-        ["~/go/bin/fortio", "load", "-qps", "100", "-t", "10s", "-c", "2", "http://localhost:8080"],
+        [fortio, "load", "-qps", "100", "-t", "10s", "-c", "2", "http://localhost:8080"],
         check=False,
         timeout=40,
     )
@@ -112,6 +114,23 @@ def test_inject_rejects_wrong_type():
         fault.inject({"type": "kill_pod"})
 
 
+def test_goal_uses_spec_target_url():
+    fault = GenerateLoadFault()
+    spec = {"type": "generate_load", "target": {"service_url": "http://svc:9000"}}
+
+    goal = fault.goal(spec)
+
+    # The spec's service_url drives the prompt instead of a hardcoded constant.
+    assert "http://svc:9000" in goal
+    assert "localhost:8080" not in goal
+
+
+def test_goal_falls_back_to_default_url_when_absent():
+    fault = GenerateLoadFault()
+    goal = fault.goal({"type": "generate_load"})
+    assert "http://localhost:8080" in goal
+
+
 def test_inject_runs_agent_and_signals_event(mocker):
     """Port of the legacy generate_load test: the LLM issues one fortio spike.
 
@@ -152,8 +171,9 @@ def test_inject_runs_agent_and_signals_event(mocker):
 
     report = fault.inject(spec, context={"chaos_active_event": event})
 
+    fortio = os.path.expanduser("~/go/bin/fortio")
     mock_run.assert_called_once_with(
-        ["~/go/bin/fortio", "load", "-qps", "100", "-t", "10s", "-c", "2", "http://localhost:8080"],
+        [fortio, "load", "-qps", "100", "-t", "10s", "-c", "2", "http://localhost:8080"],
         check=False,
         timeout=40,
     )
