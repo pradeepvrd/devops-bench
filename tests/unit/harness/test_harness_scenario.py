@@ -181,6 +181,10 @@ def test_inject_chaos_opens_and_terminates_port_forward(manager, mocker):
     assert "deployment/my-deployment" in pf_argv
     assert "8080:8080" in pf_argv
 
+    # ...with stdout/stderr discarded so an unread pipe cannot deadlock kubectl.
+    assert popen.call_args.kwargs["stdout"] == scenario_module.subprocess.DEVNULL
+    assert popen.call_args.kwargs["stderr"] == scenario_module.subprocess.DEVNULL
+
     # ...the chaos agent is driven against the local URL...
     manager.chaos_agent.run.assert_called_once()
     goal = manager.chaos_agent.run.call_args.args[0]
@@ -189,3 +193,39 @@ def test_inject_chaos_opens_and_terminates_port_forward(manager, mocker):
     # ...and the port-forward is always terminated.
     pf_process.terminate.assert_called_once()
     pf_process.wait.assert_called_once()
+
+
+def test_stop_aborts_and_terminates_port_forward(manager, mocker):
+    """stop() sets the abort flag and terminates a live port-forward."""
+    pf_process = mocker.MagicMock()
+    pf_process.poll.return_value = None  # still running
+    manager.pf_process = pf_process
+
+    manager.stop()
+
+    assert manager._aborted.is_set()
+    pf_process.terminate.assert_called_once()
+
+
+def test_stop_skips_verification(manager, mocker):
+    """A scenario stopped before verification does not run the verifier."""
+    mocker.patch.object(ScenarioManager, "_inject_chaos_with_delay")
+    manager.verifier_agent.wait_for_condition = mocker.MagicMock()
+    manager.stop()  # abort before the scenario body runs
+
+    spec = {
+        "name": "Test",
+        "trigger": {"delay_seconds": 0},
+        "action": {"type": "generate_load"},
+        "verification": {"pod_spec": {"type": "pod_healthy", "selector": "app=x"}},
+    }
+    manager.run_chaos_and_verification(spec)
+
+    manager.verifier_agent.wait_for_condition.assert_not_called()
+
+
+def test_stop_is_safe_when_no_process(manager):
+    """stop() is a no-op-safe when no port-forward was ever opened."""
+    manager.pf_process = None
+    manager.stop()  # must not raise
+    assert manager._aborted.is_set()

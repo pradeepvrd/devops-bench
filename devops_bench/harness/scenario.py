@@ -26,7 +26,7 @@ from devops_bench.chaos import ChaosAgent
 from devops_bench.core import get_logger
 from devops_bench.verification import VerifierAgent
 
-__all__ = ["ScenarioManager"]
+__all__ = ["ScenarioManager", "VERIFICATION_TIMEOUT_SEC"]
 
 _log = get_logger("harness.scenario")
 
@@ -38,7 +38,7 @@ _LOCAL_SERVICE_URL = f"http://localhost:{_LOCAL_PORT}"
 _PORT_FORWARD_SETTLE_SEC = 3
 
 # Verification budget shared across the (possibly nested) checks.
-_VERIFICATION_TIMEOUT_SEC = 120
+VERIFICATION_TIMEOUT_SEC = 120
 
 # The only chaos action type the manager drives today (planned load spike).
 _SUPPORTED_ACTION_TYPE = "generate_load"
@@ -74,6 +74,7 @@ class ScenarioManager:
         }
         self.start_time: float | None = None
         self.pf_process: subprocess.Popen[bytes] | None = None
+        self._aborted = threading.Event()
 
     def run_chaos_and_verification(
         self,
@@ -120,11 +121,11 @@ class ScenarioManager:
             self.result_holder["chaos_report"]["error"] = str(exc)
             return
 
-        if verification:
+        if verification and not self._aborted.is_set():
             _log.info("starting planned verification using VerifierAgent...")
             try:
                 verification_result = self.verifier_agent.wait_for_condition(
-                    verification, timeout_sec=_VERIFICATION_TIMEOUT_SEC
+                    verification, timeout_sec=VERIFICATION_TIMEOUT_SEC
                 )
                 _log.info(
                     "verification completed: %s",
@@ -168,6 +169,8 @@ class ScenarioManager:
         # is a genuinely long-running process held open for the duration of load
         # generation, so it uses subprocess.Popen directly rather than the
         # one-shot core.subprocess.run helper (which blocks until completion).
+        # stdout/stderr go to DEVNULL: nothing reads the pipes, so PIPE would let
+        # kubectl block once its output buffer fills under sustained load.
         _log.info(
             "establishing port-forward to deployment/%s on port %d...",
             self.target_deployment,
@@ -183,8 +186,8 @@ class ScenarioManager:
         ]
         self.pf_process = subprocess.Popen(
             pf_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
         # Give the tunnel a moment to establish.
@@ -242,3 +245,21 @@ class ScenarioManager:
             self.result_holder.get("chaos_report", {}),
             self.result_holder.get("perf_report", {}),
         )
+
+    def stop(self) -> None:
+        """Abort the scenario and release its external resources.
+
+        Sets an abort flag so a pending verification is skipped and terminates
+        the ``kubectl port-forward`` process if it is still running. Safe to call
+        more than once and from a different thread than the scenario's; it never
+        raises, so it can run from a ``finally`` block during cleanup.
+        """
+        self._aborted.set()
+        process = self.pf_process
+        if process is not None and process.poll() is None:
+            _log.info("stopping scenario: terminating GKE port-forward...")
+            try:
+                process.terminate()
+                process.wait(timeout=_PORT_FORWARD_SETTLE_SEC)
+            except Exception as exc:
+                _log.warning("error terminating port-forward during stop: %s", exc)

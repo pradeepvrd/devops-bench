@@ -26,6 +26,7 @@ from typing import Any
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.core import RunContext, get_bool, get_env, get_logger
 from devops_bench.deployers.factory import get_deployer
+from devops_bench.harness import scenario as scenario_module
 from devops_bench.harness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.harness.base import Harness
 from devops_bench.harness.scenario import ScenarioManager
@@ -46,10 +47,20 @@ _AGENT_MODULES = {
 }
 _AGENT_KEYS = {"cli": "gemini", "binary": "gemini"}
 
+# Default target deployment + namespace used both for placeholder substitution
+# in the agent prompt and as the chaos port-forward target, so the operator
+# agent and the chaos injector address the same workload when env is unset.
+_DEFAULT_TARGET_DEPLOYMENT = "hypercomputer-d1-frontend"
+_DEFAULT_NAMESPACE = "default"
+
 # How long to wait for the chaos agent to establish its load spike before
-# starting the operator agent, and to drain the scenario thread afterwards.
+# starting the operator agent.
 _CHAOS_ACTIVE_WAIT_SEC = 45
-_SCENARIO_JOIN_SEC = 90
+
+# Budget for draining the scenario thread. Kept above the verification budget
+# (defined in scenario.py) so a slow-but-completing verification is not cut off,
+# which would otherwise yield partial reports and race teardown.
+_SCENARIO_JOIN_SEC = scenario_module.VERIFICATION_TIMEOUT_SEC + 60
 
 
 class DefaultHarness(Harness):
@@ -124,8 +135,11 @@ class DefaultHarness(Harness):
             The text with all known placeholders replaced.
         """
         app_location = get_env("APP_LOCATION", "") or ""
-        target_deployment = get_env("TARGET_DEPLOYMENT_NAME", "hello-app") or "hello-app"
-        namespace = get_env("NAMESPACE", "production") or "production"
+        target_deployment = (
+            get_env("TARGET_DEPLOYMENT_NAME", _DEFAULT_TARGET_DEPLOYMENT)
+            or _DEFAULT_TARGET_DEPLOYMENT
+        )
+        namespace = get_env("NAMESPACE", _DEFAULT_NAMESPACE) or _DEFAULT_NAMESPACE
         return (
             text.replace("{{PROJECT_ID}}", self.project_id)
             .replace("{{GCP_PROJECT_ID}}", self.project_id)
@@ -160,10 +174,10 @@ class DefaultHarness(Harness):
             return None
 
         target_deployment = (
-            get_env("TARGET_DEPLOYMENT_NAME", "hypercomputer-d1-frontend")
-            or "hypercomputer-d1-frontend"
+            get_env("TARGET_DEPLOYMENT_NAME", _DEFAULT_TARGET_DEPLOYMENT)
+            or _DEFAULT_TARGET_DEPLOYMENT
         )
-        namespace = get_env("NAMESPACE", "default") or "default"
+        namespace = get_env("NAMESPACE", _DEFAULT_NAMESPACE) or _DEFAULT_NAMESPACE
 
         try:
             spec_list = self._process_spec(chaos_spec, cluster_name)
@@ -254,6 +268,7 @@ class DefaultHarness(Harness):
         """
         infra_config = item.get("infrastructure", {})
         deployer = get_deployer(infra_config, self.project_id, self.cluster_name)
+        scenario_manager: ScenarioManager | None = None
         result: dict[str, Any] | None = None
 
         try:
@@ -276,7 +291,7 @@ class DefaultHarness(Harness):
                 scenario_manager.chaos_active_event.wait(timeout=_CHAOS_ACTIVE_WAIT_SEC)
                 _log.info("cluster load spike active; proceeding with operator agent...")
             else:
-                scenario_manager, scenario_thread = None, None
+                scenario_thread = None
 
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(".")
@@ -313,6 +328,11 @@ class DefaultHarness(Harness):
         except Exception as exc:
             _log.error("critical error during task %s: %s", item.get("name"), exc)
         finally:
+            # Release the scenario's thread + port-forward + fortio even when the
+            # task errored before _drain_scenario joined it, so nothing leaks into
+            # the next task.
+            if scenario_manager is not None:
+                scenario_manager.stop()
             self._teardown(deployer, infra_config, item.get("name", ""))
 
         return result
