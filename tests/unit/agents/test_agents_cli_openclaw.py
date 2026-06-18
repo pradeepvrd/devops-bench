@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 
 import pytest
@@ -94,6 +95,17 @@ def test_parse_openclaw_session_extracts_tokens_and_trajectory():
     assert trajectory[1] == {"name": "kubectl", "output": "ok", "status": "response"}
 
 
+def test_parse_openclaw_session_tolerates_null_content():
+    # Tool-only assistant turns can carry content: null; must not raise.
+    line = json.dumps(
+        {"type": "message", "message": {"role": "assistant", "content": None, "usage": {"t": 1}}}
+    )
+    tokens, trajectory = openclaw._parse_openclaw_session(line)
+
+    assert tokens == {"t": 1}
+    assert trajectory == []
+
+
 def test_run_openclaw_agent_ssh_success(mocker):
     agent_stdout = "sessionFile=/tmp/session.jsonl\n"
     session_stdout = json.dumps(
@@ -131,6 +143,35 @@ def test_run_openclaw_agent_ssh_error(mocker):
     assert result["trajectory"] == []
 
 
+def test_run_openclaw_agent_ssh_quotes_prompt_and_agent(mocker):
+    mock_run = mocker.patch.object(openclaw, "run", return_value=_completed("no session here"))
+    mocker.patch.dict("os.environ", {}, clear=True)
+
+    # Prompt with a single quote + spaces would break naive '{prompt}' interpolation.
+    openclaw.run_openclaw_agent("delete the 'prod' pod now", agent_name="op erator")
+
+    remote_command = mock_run.call_args_list[0].args[0][-1]
+    # Prompt is shlex-quoted, so the raw unbalanced single-quote form is absent...
+    assert "-m 'delete the 'prod' pod now'" not in remote_command
+    # ...and the quoted form is present and reversible via shlex.
+    assert shlex.quote("delete the 'prod' pod now") in remote_command
+    # Agent name is quoted in both the cleanup dir and the --agent flag.
+    assert shlex.quote("op erator") in remote_command
+    assert "agents/operator/sessions" not in remote_command
+
+
+def test_run_openclaw_agent_ssh_handles_oserror(mocker):
+    # ssh binary missing -> OSError, which core.subprocess.run does not wrap.
+    mocker.patch.object(openclaw, "run", side_effect=FileNotFoundError("ssh not found"))
+    mocker.patch.dict("os.environ", {}, clear=True)
+
+    result = openclaw.run_openclaw_agent("p")
+
+    assert result["output"].startswith("Error:")
+    assert "ssh not found" in result["output"]
+    assert result["trajectory"] == []
+
+
 def test_run_openclaw_agent_local_success(mocker):
     agent_stdout = "sessionFile=/tmp/local-session.jsonl\n"
     session_content = json.dumps(
@@ -163,6 +204,18 @@ def test_run_openclaw_agent_local_error(mocker):
 
     assert result["output"].startswith("Error:")
     assert "bad" in result["output"]
+
+
+def test_run_openclaw_agent_local_handles_oserror(mocker):
+    # /bin/bash missing -> OSError, distinct from CalledProcessError.
+    mocker.patch.object(
+        openclaw.subprocess, "run", side_effect=FileNotFoundError("/bin/bash missing")
+    )
+
+    result = openclaw.run_openclaw_agent_local("p")
+
+    assert result["output"].startswith("Error:")
+    assert "/bin/bash missing" in result["output"]
 
 
 def test_openclaw_agent_run_dispatches_ssh(mocker):

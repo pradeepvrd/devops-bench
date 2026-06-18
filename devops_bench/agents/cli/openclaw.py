@@ -117,7 +117,9 @@ def _parse_openclaw_session(session_content: str) -> tuple[dict, list]:
         # Extract trajectory
         if data.get("type") == "message":
             msg = data.get("message", {})
-            content = msg.get("content", [])
+            # Tool-only assistant turns can carry ``content: null``; coalesce to a
+            # list so iteration never raises.
+            content = msg.get("content") or []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -176,15 +178,18 @@ def run_openclaw_agent(prompt: str, context: dict | None = None, agent_name: str
         )
         ssh_key = get_env("OPENCLAW_SSH_KEY", os.path.expanduser("~/.ssh/google_compute_engine"))
 
-        # The prompt is single-quoted into the remote shell string; this mirrors
-        # the legacy behavior and assumes the prompt contains no single quotes.
+        # shlex.quote every value interpolated into the remote shell string so
+        # prompts/agent names containing quotes, spaces, or newlines neither break
+        # parsing nor inject commands. The session-cleanup dir uses the actual
+        # agent_name (not a hardcoded "operator").
         set_model = _oc_set_model_cmd("~/bin/oc", " && ")
+        quoted_agent = shlex.quote(agent_name)
         remote_command = (
-            "rm -rf ~/.openclaw/agents/operator/sessions/* && "
+            f"rm -rf ~/.openclaw/agents/{quoted_agent}/sessions/* && "
             'export NVM_DIR="$HOME/.nvm" && '
             '[ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh" && '
             f"{set_model}~/bin/oc --log-level debug agent --local "
-            f"--agent {agent_name} -m '{prompt}'"
+            f"--agent {quoted_agent} -m {shlex.quote(prompt)}"
         )
 
         ssh_cmd = ["ssh", "-i", ssh_key, f"{ssh_user}@{vm_host}", remote_command]
@@ -192,9 +197,9 @@ def run_openclaw_agent(prompt: str, context: dict | None = None, agent_name: str
         start_time = time.time()
         try:
             result = run(ssh_cmd)
-        except SubprocessError as exc:
+        except (SubprocessError, OSError) as exc:
             return {
-                "output": f"Error: {exc.stderr}\nStdout: {exc.stdout}",
+                "output": f"Error: {exc}",
                 "latency": time.time() - start_time,
                 "tokens": {},
                 "tools": {},
@@ -210,12 +215,18 @@ def run_openclaw_agent(prompt: str, context: dict | None = None, agent_name: str
         trajectory: list = []
         if match:
             session_file = match.group(1)
-            read_cmd = ["ssh", "-i", ssh_key, f"{ssh_user}@{vm_host}", f"cat {session_file}"]
+            read_cmd = [
+                "ssh",
+                "-i",
+                ssh_key,
+                f"{ssh_user}@{vm_host}",
+                f"cat {shlex.quote(session_file)}",
+            ]
             try:
                 read_result = run(read_cmd)
                 tokens, trajectory = _parse_openclaw_session(read_result.stdout)
-            except SubprocessError as exc:
-                _log.warning("Failed to read session file: %s", exc.stderr)
+            except (SubprocessError, OSError) as exc:
+                _log.warning("Failed to read session file: %s", exc)
 
         return {
             "output": output,
@@ -279,6 +290,16 @@ def run_openclaw_agent_local(
         except subprocess.CalledProcessError as exc:
             return {
                 "output": f"Error: {exc.stderr}\nStdout: {exc.stdout}",
+                "latency": time.time() - start_time,
+                "tokens": {},
+                "tools": {},
+                "trajectory": [],
+                "skills": [],
+            }
+        except OSError as exc:
+            # e.g. /bin/bash missing or not executable.
+            return {
+                "output": f"Error: {exc}",
                 "latency": time.time() - start_time,
                 "tokens": {},
                 "tools": {},

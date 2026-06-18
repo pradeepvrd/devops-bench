@@ -19,7 +19,6 @@ from __future__ import annotations
 import glob
 import json
 import os
-import re
 import time
 
 from devops_bench.agents.base import AGENTS, AgentHarness
@@ -50,6 +49,54 @@ _ALLOWED_MCP_TOOLS = (
 )
 
 
+def _extract_json_object(text: str) -> dict | None:
+    """Return the last top-level JSON object embedded in ``text``, or ``None``.
+
+    The Gemini CLI interleaves its JSON payload with plain log lines that may
+    themselves contain braces. A greedy ``{.*}`` match would span from the first
+    ``{`` to the last ``}`` across unrelated lines and fail to parse. Instead this
+    scans for balanced top-level ``{...}`` spans (brace-counting, skipping braces
+    inside JSON strings) and returns the last one that parses as a dict.
+
+    Args:
+        text: Raw CLI stdout, possibly with log noise around the JSON.
+
+    Returns:
+        The parsed JSON object, or ``None`` when no balanced object parses.
+    """
+    result: dict | None = None
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start != -1:
+                try:
+                    candidate = json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    candidate = None
+                if isinstance(candidate, dict):
+                    result = candidate
+                start = -1
+    return result
+
+
 def parse_gemini_cli_output(raw_output: str) -> dict:
     """Parse the JSON output emitted by the Gemini CLI, tolerating log noise.
 
@@ -67,10 +114,8 @@ def parse_gemini_cli_output(raw_output: str) -> dict:
     session_id = None
 
     try:
-        match = re.search(r"({.*})", raw_output, re.DOTALL)
-        if match:
-            json_str = match.group(1)
-            data = json.loads(json_str)
+        data = _extract_json_object(raw_output)
+        if data is not None:
             output = data.get("response", raw_output)
             stats = data.get("stats", {})
             session_id = data.get("session_id")
@@ -105,11 +150,13 @@ def extract_trajectory_from_session(session_id: str) -> dict:
         return {"trajectory": [], "skills": []}
 
     short_id = session_id.split("-")[0] if "-" in session_id else session_id
-    pattern = os.path.join(base_dir, f"session-*-{short_id}.jsonl")
+    # Escape the id so glob metacharacters in a session id are matched literally.
+    escaped_id = glob.escape(short_id)
+    pattern = os.path.join(base_dir, f"session-*-{escaped_id}.jsonl")
     files = glob.glob(pattern)
 
     if not files:
-        pattern_rec = os.path.join(base_dir, "**", f"*{short_id}.jsonl")
+        pattern_rec = os.path.join(base_dir, "**", f"*{escaped_id}.jsonl")
         files = glob.glob(pattern_rec, recursive=True)
 
     if not files:
@@ -185,10 +232,12 @@ def run_cli_agent(
 ) -> dict:
     """Run an external CLI agent binary and collect its trajectory.
 
-    Dispatches by binary name: a ``gemini`` target is invoked directly with JSON
-    output and (optionally) pre-approved GKE MCP tools; an ``openclaw``/``oc``
-    target is delegated to the OpenClaw runner (local when ``OPENCLAW_LOCAL=true``,
-    otherwise over SSH).
+    Dispatches by binary name, checking ``gemini`` first (so a gemini path
+    containing the naive ``oc`` substring is not misrouted): a ``gemini`` target
+    is invoked directly with JSON output and (optionally) pre-approved GKE MCP
+    tools; an ``openclaw``/``oc`` target is delegated to the OpenClaw runner
+    (local when ``OPENCLAW_LOCAL=true``, otherwise over SSH); any other (generic
+    ``"binary"``) target is run with the goal/context fed as JSON on stdin.
 
     Args:
         agent_target: Path to the agent binary (``~`` expanded).
@@ -211,12 +260,11 @@ def run_cli_agent(
         if system_instruction:
             full_prompt = f"{prompt}\n\nInstructions: {system_instruction}"
 
-        if "openclaw" in target or "oc" in target:
-            if get_bool("OPENCLAW_LOCAL"):
-                return run_openclaw_agent_local(full_prompt, context, agent_name="operator")
-            return run_openclaw_agent(full_prompt, context, agent_name="operator")
-
         args = [target]
+        stdin_data: str | None = None
+        # Dispatch by binary name. Match legacy gcli.py precedence: check
+        # "gemini" FIRST so a gemini path that happens to contain the naive "oc"
+        # substring (e.g. /usr/local/bin/gemini) is not misrouted to OpenClaw.
         if "gemini" in target:
             args.extend(["-o", "json", "--skip-trust"])
             if bench_use_mcp:
@@ -225,13 +273,24 @@ def run_cli_agent(
             else:
                 args.extend(["-e", "none"])
             args.extend(["-p", full_prompt])
+        elif "openclaw" in target or "oc" in target:
+            if get_bool("OPENCLAW_LOCAL"):
+                return run_openclaw_agent_local(full_prompt, context, agent_name="operator")
+            return run_openclaw_agent(full_prompt, context, agent_name="operator")
+        else:
+            # Generic "binary" agent: legacy gcli.py passed neither -p nor flags
+            # and fed the goal/context as JSON on stdin. Preserve that contract.
+            stdin_data = json.dumps({"goal": full_prompt, "context": context})
 
         start_time = time.time()
         try:
-            result = run(args, extra_env=_gemini_env())
-        except SubprocessError as exc:
+            result = run(args, extra_env=_gemini_env(), input=stdin_data)
+        except (SubprocessError, OSError) as exc:
+            # OSError covers a missing/non-executable binary, which
+            # core.subprocess.run does not wrap.
+            detail = getattr(exc, "stderr", None) or exc
             return {
-                "output": f"Error: {exc.stderr}",
+                "output": f"Error: {detail}",
                 "latency": time.time() - start_time,
                 "tokens": {},
                 "tools": {},
