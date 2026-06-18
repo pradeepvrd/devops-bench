@@ -166,6 +166,7 @@ def test_inject_failure_marks_report_failed(manager, mocker):
 def test_inject_chaos_opens_and_terminates_port_forward(manager, mocker):
     """_inject_chaos_with_delay opens kubectl port-forward and tears it down."""
     pf_process = mocker.MagicMock()
+    pf_process.poll.return_value = None  # tunnel still alive after the settle
     popen = mocker.patch.object(
         scenario_module.subprocess, "Popen", return_value=pf_process
     )
@@ -193,6 +194,62 @@ def test_inject_chaos_opens_and_terminates_port_forward(manager, mocker):
     # ...and the port-forward is always terminated.
     pf_process.terminate.assert_called_once()
     pf_process.wait.assert_called_once()
+
+
+def test_inject_fault_goal_url_comes_from_spec(manager, mocker):
+    """The goal's target URL is read from the spec, not a parallel hardcode."""
+    action = {
+        "type": "generate_load",
+        "target": {"service_url": "http://localhost:8080", "qps": 50},
+    }
+    manager._inject_fault(action)
+
+    manager.chaos_agent.run.assert_called_once()
+    goal = manager.chaos_agent.run.call_args.args[0]
+    # The rewritten service_url is both embedded in the spec JSON and used as the
+    # "inject traffic against <url>" target in the goal text.
+    assert "http://localhost:8080" in goal
+    assert '"service_url": "http://localhost:8080"' in goal
+
+
+def test_inject_chaos_rewrites_service_url_with_local_constant(manager, mocker):
+    """The action handed to the chaos agent carries the local port-forward URL."""
+    pf_process = mocker.MagicMock()
+    pf_process.poll.return_value = None
+    mocker.patch.object(
+        scenario_module.subprocess, "Popen", return_value=pf_process
+    )
+    mocker.patch.object(scenario_module.time, "sleep")
+    inject = mocker.patch.object(manager, "_inject_fault")
+
+    # An upstream (cluster) URL that must be rewritten to the local tunnel.
+    action = {"type": "generate_load", "target": {"service_url": "http://svc.cluster"}}
+    manager._inject_chaos_with_delay({"delay_seconds": 0}, action)
+
+    handed = inject.call_args.args[0]
+    assert handed["target"]["service_url"] == scenario_module._LOCAL_SERVICE_URL
+    # The original action is not mutated in place.
+    assert action["target"]["service_url"] == "http://svc.cluster"
+
+
+def test_inject_chaos_raises_when_port_forward_exits_early(manager, mocker):
+    """A port-forward that exits during the settle aborts before injecting load."""
+    pf_process = mocker.MagicMock()
+    pf_process.poll.return_value = 1  # kubectl already exited
+    pf_process.returncode = 1
+    mocker.patch.object(
+        scenario_module.subprocess, "Popen", return_value=pf_process
+    )
+    mocker.patch.object(scenario_module.time, "sleep")
+
+    action = {"type": "generate_load", "target": {"service_url": "http://svc"}}
+    with pytest.raises(RuntimeError, match="exited early"):
+        manager._inject_chaos_with_delay({"delay_seconds": 0}, action)
+
+    # No load is generated against the dead tunnel. The process already exited,
+    # so no terminate() is needed (and run_chaos_and_verification records the
+    # failure; stop() in the harness finally is a no-op on an exited process).
+    manager.chaos_agent.run.assert_not_called()
 
 
 def test_stop_aborts_and_terminates_port_forward(manager, mocker):

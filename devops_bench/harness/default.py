@@ -24,7 +24,13 @@ import threading
 from typing import Any
 
 from devops_bench.agents import AGENTS, AgentHarness
-from devops_bench.core import RunContext, get_bool, get_env, get_logger
+from devops_bench.core import (
+    NotRegisteredError,
+    RunContext,
+    get_bool,
+    get_env,
+    get_logger,
+)
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.harness import scenario as scenario_module
 from devops_bench.harness.artifacts import collect_generated_files, snapshot_dir
@@ -110,6 +116,8 @@ class DefaultHarness(Harness):
 
         Raises:
             ValueError: If ``agent_type`` maps to no known agent module.
+            NotRegisteredError: If the imported module did not register an agent
+                under the resolved key.
         """
         module_name = _AGENT_MODULES.get(agent_type)
         if module_name is None:
@@ -117,6 +125,11 @@ class DefaultHarness(Harness):
         importlib.import_module(module_name)
         key = _AGENT_KEYS.get(agent_type, agent_type)
         agent_cls = AGENTS.get(key)
+        # AGENTS.get raises on a true miss, but guard against a module that
+        # imported yet failed to register (a None/falsy entry) so the caller sees
+        # a clear error instead of an opaque ``TypeError`` from ``None()``.
+        if agent_cls is None:
+            raise NotRegisteredError(AGENTS.name, key, AGENTS.keys())
         return agent_cls()
 
     # -- placeholder substitution -----------------------------------------
@@ -237,11 +250,9 @@ class DefaultHarness(Harness):
         run_dir = os.path.join(self.results_root, f"run_{timestamp}")
         os.makedirs(run_dir, exist_ok=True)
 
-        detailed_results: list[dict[str, Any]] = []
-        for item in eval_data:
-            result = self._run_one(item, run_dir)
-            if result is not None:
-                detailed_results.append(result)
+        detailed_results: list[dict[str, Any]] = [
+            self._run_one(item, run_dir) for item in eval_data
+        ]
 
         # Persist raw execution outputs before the (slower) scoring pass.
         self._write_results(run_dir, detailed_results)
@@ -255,7 +266,7 @@ class DefaultHarness(Harness):
         )
         return detailed_results
 
-    def _run_one(self, item: dict[str, Any], run_dir: str) -> dict[str, Any] | None:
+    def _run_one(self, item: dict[str, Any], run_dir: str) -> dict[str, Any]:
         """Provision, run the agent, collect artifacts, tear down for one task.
 
         Args:
@@ -263,8 +274,9 @@ class DefaultHarness(Harness):
             run_dir: The run output directory for generated artifacts.
 
         Returns:
-            The detailed result dict, or None if provisioning/execution failed
-            before any result could be assembled.
+            The detailed result dict. On any failure a ``status: "failed"``
+            record (with ``error`` and ``score: 0``) is returned instead of being
+            dropped, so failures stay visible to downstream parsers.
         """
         infra_config = item.get("infrastructure", {})
         deployer = get_deployer(infra_config, self.project_id, self.cluster_name)
@@ -315,6 +327,7 @@ class DefaultHarness(Harness):
                 "trajectory": agent_res.get("trajectory", []),
                 "skills": agent_res.get("skills", []),
                 "name": item["name"],
+                "status": "success",
                 "expected_output": expected_output,
                 "expected_output_raw": item.get("expected_output", ""),
                 "retrieval_context": item.get("retrieval_context", []),
@@ -327,6 +340,7 @@ class DefaultHarness(Harness):
             _log.info("agent response for %s:\n%s", item["name"], result["output"])
         except Exception as exc:
             _log.error("critical error during task %s: %s", item.get("name"), exc)
+            result = self._failed_record(item, exc)
         finally:
             # Release the scenario's thread + port-forward + fortio even when the
             # task errored before _drain_scenario joined it, so nothing leaks into
@@ -336,6 +350,40 @@ class DefaultHarness(Harness):
             self._teardown(deployer, infra_config, item.get("name", ""))
 
         return result
+
+    @staticmethod
+    def _failed_record(item: dict[str, Any], exc: Exception) -> dict[str, Any]:
+        """Build a minimal failed-task record so the failure stays visible.
+
+        Args:
+            item: The task spec that failed.
+            exc: The exception that aborted the task.
+
+        Returns:
+            A result dict marked ``status: "failed"`` with ``score: 0`` and the
+            error message, carrying through the task's identifying fields.
+        """
+        return {
+            "input": item.get("input", ""),
+            "output": "",
+            "latency": 0.0,
+            "tokens": {},
+            "tools": {},
+            "trajectory": [],
+            "skills": [],
+            "name": item.get("name", ""),
+            "status": "failed",
+            "error": str(exc),
+            "score": 0,
+            "expected_output": item.get("expected_output", ""),
+            "expected_output_raw": item.get("expected_output", ""),
+            "retrieval_context": item.get("retrieval_context", []),
+            "chaos_spec": item.get("chaos_spec"),
+            "verification_spec": item.get("verification_spec"),
+            "chaos_report": {},
+            "perf_report": {},
+            "documentation": item.get("documentation", []),
+        }
 
     def _drain_scenario(
         self,
@@ -384,15 +432,17 @@ class DefaultHarness(Harness):
 
         Args:
             detailed_results: Execution results to score; ``scores`` is written
-                into each in place.
+                into each in place. Records marked ``status: "failed"`` are
+                skipped, since there is no agent output to judge.
         """
-        if not detailed_results:
+        scorable = [r for r in detailed_results if r.get("status") != "failed"]
+        if not scorable:
             return
         # Lazy import keeps deepeval/provider SDKs out of harness import.
         from devops_bench.metrics import evaluate_metrics_batch, get_judge_model
 
         judge_model = self._judge_model or get_judge_model()
-        evaluate_metrics_batch(detailed_results, judge_model)
+        evaluate_metrics_batch(scorable, judge_model)
 
     @staticmethod
     def _write_results(run_dir: str, detailed_results: list[dict[str, Any]]) -> None:

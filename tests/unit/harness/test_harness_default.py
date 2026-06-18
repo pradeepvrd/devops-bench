@@ -20,7 +20,7 @@ import json
 
 import pytest
 
-from devops_bench.core import ClusterInfo
+from devops_bench.core import ClusterInfo, NotRegisteredError
 from devops_bench.harness import default as default_module
 from devops_bench.harness.default import DefaultHarness
 
@@ -76,6 +76,15 @@ def test_resolve_agent_uses_registry(harness, mocker):
 def test_resolve_agent_unknown_type(harness):
     with pytest.raises(ValueError, match="unknown agent type"):
         harness.resolve_agent("nope")
+
+
+def test_resolve_agent_imported_but_unregistered(harness, mocker):
+    """A module that imports but does not register raises a clear error."""
+    mocker.patch.object(default_module.importlib, "import_module")
+    mocker.patch.object(default_module.AGENTS, "get", return_value=None)
+
+    with pytest.raises(NotRegisteredError, match="gemini"):
+        harness.resolve_agent("cli")
 
 
 def test_run_pipeline_happy_path(harness, mocker, tmp_path):
@@ -161,6 +170,97 @@ def test_run_with_chaos_starts_scenario_and_drains(harness, mocker, tmp_path):
     assert results[0]["perf_report"] == {"uptime_percentage": 100.0}
 
 
+def test_run_stops_scenario_on_agent_exception(harness, mocker, tmp_path):
+    """A mid-task failure still stops the scenario and emits a failed record."""
+    deployer = mocker.MagicMock()
+    deployer.get_cluster_info.return_value = ClusterInfo(name="live-cluster")
+    mocker.patch.object(default_module, "get_deployer", return_value=deployer)
+
+    agent = mocker.MagicMock()
+    agent.run.side_effect = RuntimeError("agent blew up")
+    mocker.patch.object(harness, "resolve_agent", return_value=agent)
+    mocker.patch.object(default_module, "snapshot_dir", return_value=set())
+    mocker.patch.object(harness, "_score")
+    harness.results_root = str(tmp_path)
+
+    scenario_manager = mocker.MagicMock()
+    thread = mocker.MagicMock()
+    mocker.patch.object(
+        harness, "start_scenario", return_value=(scenario_manager, thread)
+    )
+
+    item = {
+        "name": "Doomed Task",
+        "input": "do the thing",
+        "expected_output": "done",
+        "chaos_spec": [{"action": {"type": "generate_load"}}],
+    }
+    results = harness.run([item])
+
+    # Scenario cleanup + teardown ran despite the exception.
+    scenario_manager.stop.assert_called_once()
+    deployer.down.assert_called_once()
+    # A failed-task record is emitted, not dropped.
+    assert len(results) == 1
+    rec = results[0]
+    assert rec["status"] == "failed"
+    assert rec["error"] == "agent blew up"
+    assert rec["score"] == 0
+    assert rec["name"] == "Doomed Task"
+
+
+def test_failed_record_shape(harness):
+    item = {
+        "name": "T",
+        "input": "in",
+        "expected_output": "out",
+        "documentation": [{"doc_name": "d"}],
+    }
+    rec = harness._failed_record(item, ValueError("nope"))
+    assert rec["status"] == "failed"
+    assert rec["error"] == "nope"
+    assert rec["score"] == 0
+    assert rec["output"] == ""
+    assert rec["name"] == "T"
+    assert rec["documentation"] == [{"doc_name": "d"}]
+
+
+def test_score_skips_failed_records(mocker):
+    harness = DefaultHarness("p", "c", judge_model=object())
+    evaluate = mocker.patch("devops_bench.metrics.evaluate_metrics_batch")
+    mocker.patch("devops_bench.metrics.get_judge_model", return_value=object())
+
+    results = [
+        {"name": "ok"},
+        {"name": "bad", "status": "failed"},
+    ]
+    harness._score(results)
+
+    # Only the non-failed record is handed to the scorer.
+    scored = evaluate.call_args.args[0]
+    assert scored == [{"name": "ok"}]
+
+
+def test_shared_defaults_consistent_when_env_unset(harness, mocker, monkeypatch):
+    """Prompt placeholder + chaos target use the same default deployment/ns."""
+    monkeypatch.delenv("TARGET_DEPLOYMENT_NAME", raising=False)
+    monkeypatch.delenv("NAMESPACE", raising=False)
+
+    # The placeholder path resolves to the shared defaults.
+    prompt = harness.replace_placeholders(
+        "{{TARGET_DEPLOYMENT_NAME}}/{{NAMESPACE}}", "c"
+    )
+    assert prompt == f"{default_module._DEFAULT_TARGET_DEPLOYMENT}/{default_module._DEFAULT_NAMESPACE}"
+
+    # The scenario path constructs ScenarioManager with the same pair.
+    sm = mocker.patch.object(default_module, "ScenarioManager")
+    mocker.patch.object(default_module.threading, "Thread")
+    harness.start_scenario([{"action": {"type": "generate_load"}}], None, "c")
+    sm.assert_called_once_with(
+        default_module._DEFAULT_TARGET_DEPLOYMENT, default_module._DEFAULT_NAMESPACE
+    )
+
+
 def test_teardown_skipped_when_no_teardown_env(harness, mocker, monkeypatch):
     monkeypatch.setenv("BENCH_NO_TEARDOWN", "true")
     deployer = mocker.MagicMock()
@@ -202,58 +302,6 @@ def test_start_scenario_builds_daemon_thread(harness, mocker, monkeypatch):
     # The first chaos spec is handed to the manager.
     _, kwargs = thread_cls.call_args
     assert kwargs["args"][0] == chaos_spec[0]
-
-
-def test_shared_defaults_consistent_when_env_unset(harness, mocker, monkeypatch):
-    """Prompt placeholder + chaos target use the same default deployment/ns."""
-    monkeypatch.delenv("TARGET_DEPLOYMENT_NAME", raising=False)
-    monkeypatch.delenv("NAMESPACE", raising=False)
-
-    # The placeholder path resolves to the shared defaults.
-    prompt = harness.replace_placeholders(
-        "{{TARGET_DEPLOYMENT_NAME}}/{{NAMESPACE}}", "c"
-    )
-    assert prompt == f"{default_module._DEFAULT_TARGET_DEPLOYMENT}/{default_module._DEFAULT_NAMESPACE}"
-
-    # The scenario path constructs ScenarioManager with the same pair.
-    sm = mocker.patch.object(default_module, "ScenarioManager")
-    mocker.patch.object(default_module.threading, "Thread")
-    harness.start_scenario([{"action": {"type": "generate_load"}}], None, "c")
-    sm.assert_called_once_with(
-        default_module._DEFAULT_TARGET_DEPLOYMENT, default_module._DEFAULT_NAMESPACE
-    )
-
-
-def test_run_stops_scenario_on_exception(harness, mocker, tmp_path):
-    """A mid-task failure still stops the scenario so resources do not leak."""
-    deployer = mocker.MagicMock()
-    deployer.get_cluster_info.return_value = ClusterInfo(name="live-cluster")
-    mocker.patch.object(default_module, "get_deployer", return_value=deployer)
-
-    agent = mocker.MagicMock()
-    agent.run.side_effect = RuntimeError("agent blew up")
-    mocker.patch.object(harness, "resolve_agent", return_value=agent)
-    mocker.patch.object(default_module, "snapshot_dir", return_value=set())
-    mocker.patch.object(harness, "_score")
-    harness.results_root = str(tmp_path)
-
-    scenario_manager = mocker.MagicMock()
-    thread = mocker.MagicMock()
-    mocker.patch.object(
-        harness, "start_scenario", return_value=(scenario_manager, thread)
-    )
-
-    item = {
-        "name": "Doomed Task",
-        "input": "do the thing",
-        "expected_output": "done",
-        "chaos_spec": [{"action": {"type": "generate_load"}}],
-    }
-    harness.run([item])
-
-    # Scenario cleanup + teardown ran despite the exception.
-    scenario_manager.stop.assert_called_once()
-    deployer.down.assert_called_once()
 
 
 def test_score_builds_judge_when_absent(mocker):

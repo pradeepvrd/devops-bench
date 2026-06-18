@@ -190,8 +190,15 @@ class ScenarioManager:
             stderr=subprocess.DEVNULL,
         )
 
-        # Give the tunnel a moment to establish.
+        # Give the tunnel a moment to establish, then fail fast if kubectl
+        # already exited (e.g. missing deployment, auth error) so chaos load is
+        # not pointed at a dead tunnel.
         time.sleep(_PORT_FORWARD_SETTLE_SEC)
+        if self.pf_process.poll() is not None:
+            raise RuntimeError(
+                f"kubectl port-forward exited early (code {self.pf_process.returncode}) "
+                f"for deployment/{self.target_deployment} in {self.namespace!r}"
+            )
 
         # 2. Redirect chaos load generation to the local port-forwarded URL.
         local_action = action.copy()
@@ -224,12 +231,17 @@ class ScenarioManager:
         action_type = action.get("type", _SUPPORTED_ACTION_TYPE)
         if action_type != _SUPPORTED_ACTION_TYPE:
             raise ValueError(f"unsupported chaos action type {action_type!r}")
+        # The target URL is carried in the spec (rewritten to the local
+        # port-forward in _inject_chaos_with_delay); read it back from the action
+        # so the goal text and the spec stay a single source of truth rather than
+        # re-hardcoding the URL here.
+        service_url = action.get("target", {}).get("service_url", _LOCAL_SERVICE_URL)
         goal = (
             "Your goal is to execute the following GKE planned chaos engineering "
             "disruption action:\n"
             f"```json\n{json.dumps(action, indent=2)}\n```\n\n"
             "Use the 'fortio' tool via your run_command tool to inject traffic "
-            f"against {_LOCAL_SERVICE_URL}. Execute exactly one load spike, then "
+            f"against {service_url}. Execute exactly one load spike, then "
             "report the results and exit."
         )
         self.chaos_agent.run(goal)
