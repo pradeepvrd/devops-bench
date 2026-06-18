@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 
 import pytest
 
@@ -44,6 +46,90 @@ def test_enter_without_mcp_sdk_raises(mocker):
 
     client = mcp_mod.MCPClient("server")
     with pytest.raises(MissingDependencyError):
+        asyncio.run(client.__aenter__())
+
+
+def _install_fake_mcp_sdk(mocker):
+    """Inject fake ``mcp.client.session``/``mcp.client.stdio`` modules.
+
+    Returns a ``state`` dict that records lifecycle events: ``captured`` (the
+    ``StdioServerParameters`` kwargs), ``initialized``/``transport_closed``/
+    ``session_closed`` flags, and ``session`` (the fake session, which serves
+    canned ``list_tools``/``call_tool`` results). Nothing spawns a real process.
+    """
+    state: dict = {
+        "captured": {},
+        "initialized": False,
+        "transport_closed": False,
+        "session_closed": False,
+        "session": None,
+    }
+
+    class _StdioServerParameters:
+        def __init__(self, **kwargs):
+            state["captured"].update(kwargs)
+
+    class _Transport:
+        async def __aenter__(self):
+            return ("read", "write")
+
+        async def __aexit__(self, *a):
+            state["transport_closed"] = True
+            return False
+
+    def _stdio_client(_params):
+        return _Transport()
+
+    class _ClientSession:
+        def __init__(self, read, write):
+            self.read = read
+            self.write = write
+            state["session"] = self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            state["session_closed"] = True
+            return False
+
+        async def initialize(self):
+            state["initialized"] = True
+
+        async def list_tools(self):
+            return "tools-result"
+
+        async def call_tool(self, name, arguments):
+            return f"called {name} with {arguments}"
+
+    session_mod = types.ModuleType("mcp.client.session")
+    session_mod.ClientSession = _ClientSession
+    stdio_mod = types.ModuleType("mcp.client.stdio")
+    stdio_mod.StdioServerParameters = _StdioServerParameters
+    stdio_mod.stdio_client = _stdio_client
+
+    mocker.patch.dict(
+        sys.modules,
+        {"mcp.client.session": session_mod, "mcp.client.stdio": stdio_mod},
+    )
+    return state
+
+
+def test_enter_splits_multiword_server_path(mocker):
+    state = _install_fake_mcp_sdk(mocker)
+    client = mcp_mod.MCPClient("uv run mcp-server")
+
+    asyncio.run(client.__aenter__())
+
+    # The command word is the executable; the rest become args.
+    assert state["captured"] == {"command": "uv", "args": ["run", "mcp-server"]}
+
+
+def test_enter_empty_server_path_raises(mocker):
+    _install_fake_mcp_sdk(mocker)
+    client = mcp_mod.MCPClient("   ")
+
+    with pytest.raises(ValueError, match="empty"):
         asyncio.run(client.__aenter__())
 
 

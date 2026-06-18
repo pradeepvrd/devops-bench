@@ -105,6 +105,25 @@ class _ToolInfo:
         self.inputSchema = inputSchema
 
 
+def _extract_tool_text(tool_result: Any) -> str:
+    """Aggregate the text of every content block in an MCP tool result.
+
+    Args:
+        tool_result: The raw result returned by ``MCPClient.call_tool``.
+
+    Returns:
+        The newline-joined text of all blocks exposing a ``text`` attribute. If
+        the result has no ``content`` blocks (or none carry text), the result is
+        stringified instead.
+    """
+    content = getattr(tool_result, "content", None)
+    if content:
+        texts = [block.text for block in content if hasattr(block, "text")]
+        if texts:
+            return "\n".join(texts)
+    return str(tool_result)
+
+
 async def process_query(
     llm_client: LLMClient,
     contents: list[dict],
@@ -157,15 +176,11 @@ async def process_query(
                         result_text = f.read()
                 except OSError as exc:
                     result_text = f"Error reading skill file {file_path}: {exc}"
+            elif mcp_client is None:
+                result_text = "Error: MCP client is not initialized; no tools are available."
             else:
                 tool_result = await mcp_client.call_tool(name, args)
-                result_text = (
-                    tool_result.content[0].text
-                    if hasattr(tool_result, "content")
-                    and tool_result.content
-                    and hasattr(tool_result.content[0], "text")
-                    else str(tool_result)
-                )
+                result_text = _extract_tool_text(tool_result)
 
             contents.append(
                 {"role": "tool", "tool_call_id": call_id, "name": name, "content": result_text}

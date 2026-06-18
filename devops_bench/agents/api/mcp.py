@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import shlex
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -41,6 +42,7 @@ class MCPClient:
 
     Raises:
         MissingDependencyError: If the ``mcp`` SDK is not installed (on enter).
+        ValueError: If ``server_path`` is empty or whitespace-only (on enter).
     """
 
     def __init__(self, server_path: str) -> None:
@@ -56,7 +58,17 @@ class MCPClient:
         except ImportError as exc:  # pragma: no cover - exercised via MissingDependencyError
             raise MissingDependencyError("the API agent's MCP client", "mcp") from exc
 
-        server_params = StdioServerParameters(command=self.server_path)
+        # Split the command so a multi-word server_path (e.g. "uv run mcp-server")
+        # is spawned as program + args rather than a single executable name; the
+        # stdio transport spawns without a shell, so an unsplit command would fail
+        # with FileNotFoundError.
+        parts = shlex.split(self.server_path or "")
+        if not parts:
+            raise ValueError(
+                "MCP server_path is empty; set AGENT_TARGET/MCP_SERVER_PATH to the "
+                "MCP server command."
+            )
+        server_params = StdioServerParameters(command=parts[0], args=parts[1:])
         stdio_transport = await self.exit_stack.enter_async_context(
             stdio_client(server_params)
         )
