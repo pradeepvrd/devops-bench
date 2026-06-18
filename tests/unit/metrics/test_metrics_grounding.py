@@ -80,6 +80,36 @@ def _metric_result(name, score, success, reason="ok"):
     return SimpleNamespace(test_results=[test_result])
 
 
+def _named_geval(mocker):
+    """Patch grounding.GEval so each metric carries its real ``name``."""
+    return mocker.patch.object(
+        grounding, "GEval", side_effect=lambda **kw: SimpleNamespace(name=kw["name"])
+    )
+
+
+def _evaluate_by_outcome(mocker, outcomes):
+    """Order-agnostic ``evaluate`` keyed off the metric name.
+
+    ``outcomes`` maps a metric name (as built by the grounding code, e.g.
+    ``"Doc Constraint: use TLS"``) to a ``(score, success)`` pair. The reported
+    name carries DeepEval's ``" [GEval]"`` suffix so the strip path is exercised.
+
+    Args:
+        mocker: pytest-mock fixture.
+        outcomes: ``{metric_name: (score, success)}``.
+
+    Returns:
+        The patched ``evaluate`` mock.
+    """
+
+    def _side_effect(test_cases, metrics):
+        name = metrics[0].name
+        score, success = outcomes[name]
+        return _metric_result(f"{name} [GEval]", score, success)
+
+    return mocker.patch.object(grounding, "evaluate", side_effect=_side_effect)
+
+
 def test_grounding_no_constraints_returns_early(mocker):
     evaluate = mocker.patch.object(grounding, "evaluate")
     scores: dict = {}
@@ -91,7 +121,7 @@ def test_grounding_no_constraints_returns_early(mocker):
 
 
 def test_grounding_all_applied_scores_full(mocker):
-    mocker.patch.object(grounding, "GEval")
+    _named_geval(mocker)
     docs = [
         {
             "constraints": [
@@ -101,24 +131,25 @@ def test_grounding_all_applied_scores_full(mocker):
         }
     ]
     scores: dict = {}
-    # One evaluate() call per constraint metric, in doc order.
-    results = iter(
-        [
-            _metric_result("Doc Constraint: use TLS", 5.0, True),
-            _metric_result("Doc Constraint: set replicas", 5.0, True),
-        ]
+    _evaluate_by_outcome(
+        mocker,
+        {
+            "Doc Constraint: use TLS": (5.0, True),
+            "Doc Constraint: set replicas": (5.0, True),
+        },
     )
-    mocker.patch.object(grounding, "evaluate", side_effect=lambda cases, metrics: next(results))
 
     evaluate_documentation_grounding(docs, MagicMock(), MagicMock(), scores)
 
     assert scores["GroundingAccuracy"]["score"] == 5.0
     assert scores["GroundingAccuracy"]["success"] is True
     assert scores["ParameterRecallAccuracy"] == 1.0
+    # Per-constraint keys recorded with the [GEval] suffix stripped.
+    assert scores["Doc Constraint: use TLS"]["success"] is True
 
 
 def test_grounding_critical_missing_scores_partial(mocker):
-    mocker.patch.object(grounding, "GEval")
+    _named_geval(mocker)
     docs = [
         {
             "constraints": [
@@ -128,13 +159,13 @@ def test_grounding_critical_missing_scores_partial(mocker):
         }
     ]
     scores: dict = {}
-    results = iter(
-        [
-            _metric_result("Doc Constraint: use TLS", 0.0, False),
-            _metric_result("Doc Constraint: set replicas", 5.0, True),
-        ]
+    _evaluate_by_outcome(
+        mocker,
+        {
+            "Doc Constraint: use TLS": (0.0, False),
+            "Doc Constraint: set replicas": (5.0, True),
+        },
     )
-    mocker.patch.object(grounding, "evaluate", side_effect=lambda cases, metrics: next(results))
 
     evaluate_documentation_grounding(docs, MagicMock(), MagicMock(), scores)
 
@@ -145,14 +176,10 @@ def test_grounding_critical_missing_scores_partial(mocker):
 
 
 def test_grounding_none_applied_scores_zero(mocker):
-    mocker.patch.object(grounding, "GEval")
+    _named_geval(mocker)
     docs = [{"constraints": [{"text": "use TLS", "critical": True}]}]
     scores: dict = {}
-    mocker.patch.object(
-        grounding,
-        "evaluate",
-        return_value=_metric_result("Doc Constraint: use TLS", 0.0, False),
-    )
+    _evaluate_by_outcome(mocker, {"Doc Constraint: use TLS": (0.0, False)})
 
     evaluate_documentation_grounding(docs, MagicMock(), MagicMock(), scores)
 
@@ -163,24 +190,18 @@ def test_grounding_none_applied_scores_zero(mocker):
 def test_grounding_dedups_shared_constraint_text(mocker):
     # Two guides share the same constraint text; it must collapse to one metric
     # so a perfect 5.0 (applied == unique total) is reachable.
-    mocker.patch.object(grounding, "GEval")
+    _named_geval(mocker)
     docs = [
         {"constraints": [{"text": "use TLS", "critical": True}]},
         {"constraints": [{"text": "use TLS", "critical": True}]},
     ]
     scores: dict = {}
-    calls = {"n": 0}
-
-    def _one_metric(cases, metrics):
-        calls["n"] += 1
-        return _metric_result("Doc Constraint: use TLS", 5.0, True)
-
-    mocker.patch.object(grounding, "evaluate", side_effect=_one_metric)
+    evaluate = _evaluate_by_outcome(mocker, {"Doc Constraint: use TLS": (5.0, True)})
 
     evaluate_documentation_grounding(docs, MagicMock(), MagicMock(), scores)
 
     # Deduped: a single metric evaluated once, and the perfect score is reachable.
-    assert calls["n"] == 1
+    assert evaluate.call_count == 1
     assert scores["GroundingAccuracy"]["score"] == 5.0
     assert scores["GroundingAccuracy"]["success"] is True
     assert scores["ParameterRecallAccuracy"] == 1.0

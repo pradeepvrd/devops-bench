@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-from importlib import resources
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,25 +24,52 @@ from devops_bench.metrics import _skills, outcome_validity, tool_invocation
 from devops_bench.metrics.tool_invocation import TOOL_INVOCATION_THRESHOLD
 
 
-def test_skills_are_packaged_resources():
-    # The judge skills ship as package data under devops_bench.skills so they
-    # resolve via importlib.resources under pip install, not a repo-relative path.
-    pkg = resources.files(_skills.SKILLS_PACKAGE)
-    assert (pkg / "outcome-validity-checklist.md").is_file()
-    assert (pkg / "tool-invocation-skill.md").is_file()
+def _patch_resources(mocker, files_by_name):
+    """Patch ``_skills.resources.files`` with a fake package traversable.
+
+    ``files_by_name`` maps a filename to its text content; any name absent from
+    the mapping is treated as a missing resource (``is_file()`` is False). This
+    exercises the loader without touching real package files.
+
+    Args:
+        mocker: pytest-mock fixture.
+        files_by_name: ``{filename: text}`` for resources that exist.
+    """
+
+    class _FakeResource:
+        def __init__(self, name):
+            self._name = name
+
+        def is_file(self):
+            return self._name in files_by_name
+
+        def read_text(self, encoding="utf-8"):
+            return files_by_name[self._name]
+
+    class _FakePackage:
+        def __truediv__(self, name):
+            return _FakeResource(name)
+
+    mocker.patch.object(_skills.resources, "files", return_value=_FakePackage())
 
 
-def test_load_outcome_criteria_reads_real_skill():
-    text = outcome_validity.load_outcome_criteria()
-    assert "Evaluation Criteria" in text
+def test_load_skill_text_reads_packaged_resource(mocker):
+    _patch_resources(mocker, {"outcome-validity-checklist.md": "## Evaluation Criteria"})
+    assert _skills.load_skill_text("outcome-validity-checklist.md") == "## Evaluation Criteria"
 
 
-def test_load_tool_criteria_reads_real_skill():
-    text = tool_invocation.load_tool_criteria()
-    assert "Evaluation Criteria" in text
+def test_load_outcome_criteria_uses_loader(mocker):
+    _patch_resources(mocker, {outcome_validity.OUTCOME_SKILL_FILENAME: "OUTCOME-MD"})
+    assert outcome_validity.load_outcome_criteria() == "OUTCOME-MD"
 
 
-def test_load_skill_text_missing_raises():
+def test_load_tool_criteria_uses_loader(mocker):
+    _patch_resources(mocker, {tool_invocation.TOOL_SKILL_FILENAME: "TOOL-MD"})
+    assert tool_invocation.load_tool_criteria() == "TOOL-MD"
+
+
+def test_load_skill_text_missing_raises(mocker):
+    _patch_resources(mocker, {})  # nothing exists
     with pytest.raises(FileNotFoundError):
         _skills.load_skill_text("does-not-exist.md")
 

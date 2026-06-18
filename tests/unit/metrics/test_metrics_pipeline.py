@@ -177,22 +177,24 @@ def test_batch_skips_tool_when_mcp_disabled(mocker):
 
 def test_batch_computes_checklist_score(mocker):
     mocker.patch.object(pipeline, "get_bool", return_value=True)
-    mocker.patch.object(pipeline, "build_outcome_validity_metric", return_value=MagicMock())
-    mocker.patch.object(pipeline, "build_tool_invocation_metric", return_value=MagicMock())
+    mocker.patch.object(
+        pipeline,
+        "build_outcome_validity_metric",
+        return_value=SimpleNamespace(name="OutcomeValidity"),
+    )
+    mocker.patch.object(
+        pipeline,
+        "build_tool_invocation_metric",
+        return_value=SimpleNamespace(name="ToolInvocation"),
+    )
     mocker.patch.object(pipeline, "LLMTestCase")
     # Give the dynamic GEval metric a stable name so success can be matched.
     mocker.patch.object(
         pipeline, "GEval", side_effect=lambda **kw: SimpleNamespace(name=kw["name"])
     )
-    mocker.patch.object(
-        pipeline,
-        "evaluate",
-        side_effect=[
-            _metric_result("OutcomeValidity"),
-            _metric_result("ToolInvocation"),
-            _metric_result("Check: replicas=3", success=True),
-        ],
-    )
+    # Order-agnostic: every evaluated metric (outcome, tool, and the dynamic
+    # "Check: replicas=3") resolves by its own name and reports a suffixed key.
+    mocker.patch.object(pipeline, "evaluate", side_effect=_evaluate_by_metric_name())
     judge = MagicMock()
     results = [
         _base_result(expected_output="Critical Requirements:\n- replicas=3\n")
@@ -201,16 +203,26 @@ def test_batch_computes_checklist_score(mocker):
     evaluate_metrics_batch(results, judge)
 
     scores = results[0]["scores"]
+    # The dynamic check key is also stripped of the [GEval] suffix.
+    assert "Check: replicas=3" in scores
     assert scores["ChecklistScore"]["score"] == 1.0
     assert scores["ChecklistScore"]["success"] is True
 
 
 def test_batch_invokes_grounding_and_chaos(mocker):
     mocker.patch.object(pipeline, "get_bool", return_value=True)
-    mocker.patch.object(pipeline, "build_outcome_validity_metric", return_value=MagicMock())
-    mocker.patch.object(pipeline, "build_tool_invocation_metric", return_value=MagicMock())
+    mocker.patch.object(
+        pipeline,
+        "build_outcome_validity_metric",
+        return_value=SimpleNamespace(name="OutcomeValidity"),
+    )
+    mocker.patch.object(
+        pipeline,
+        "build_tool_invocation_metric",
+        return_value=SimpleNamespace(name="ToolInvocation"),
+    )
     mocker.patch.object(pipeline, "LLMTestCase")
-    mocker.patch.object(pipeline, "evaluate", return_value=_metric_result("OutcomeValidity"))
+    mocker.patch.object(pipeline, "evaluate", side_effect=_evaluate_by_metric_name())
     grounding = mocker.patch.object(pipeline, "evaluate_documentation_grounding")
     retrieval = mocker.patch.object(
         pipeline, "calculate_doc_retrieval_rate", return_value=0.5
