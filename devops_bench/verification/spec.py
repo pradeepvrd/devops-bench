@@ -30,14 +30,22 @@ SingleVerificationSpec = PodHealthyVerifier | ScalingCompleteVerifier
 
 class VerificationSpec(
     RootModel[
-        dict[str, SingleVerificationSpec]
-        | list[SingleVerificationSpec]
+        dict[str, "VerificationSpec"]
+        | list["VerificationSpec"]
         | SingleVerificationSpec
     ]
 ):
     """A structured verification spec: a single check, a list, or a named dict.
 
-    Lists run their members in sequence; dicts run named members and map each
-    result back to its key. Both are evaluated recursively by
-    :class:`~devops_bench.verification.runner.VerifierAgent`.
+    The schema is recursive: a list's members and a dict's values are themselves
+    full ``VerificationSpec`` values, so compounds may nest arbitrarily
+    (list-of-lists, dict-of-lists, ...) to match the
+    :class:`~devops_bench.verification.runner.VerifierAgent` dispatcher's
+    recursion. Lists run their members in sequence; dicts run named members and
+    map each result back to its key.
     """
+
+
+# The root annotation references ``VerificationSpec`` by name (forward ref), so
+# rebuild the model once the class exists to resolve it.
+VerificationSpec.model_rebuild()

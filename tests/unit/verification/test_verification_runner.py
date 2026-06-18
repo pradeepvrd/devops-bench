@@ -98,6 +98,41 @@ def test_compound_list_aggregates_in_order(mocker):
     assert len(result.details) == 2
 
 
+def test_nested_compound_spec_recurses(mocker):
+    # A dict whose value is a list (compound nested inside compound) must parse
+    # under the recursive schema and dispatch through both levels.
+    mocker.patch.object(PodHealthyVerifier, "verify", return_value=_ok())
+    mocker.patch.object(ScalingCompleteVerifier, "verify", return_value=_fail("scaled short"))
+
+    spec = {
+        "group_a": [
+            {"type": "pod_healthy", "selector": "app=a"},
+            {"type": "scaling_complete", "deployment": "d", "min_replicas": 2},
+        ],
+    }
+    result = VerifierAgent().wait_for_condition(spec, timeout_sec=60)
+
+    # Outer dict fails because its inner list fails.
+    assert result.success is False
+    assert "group_a failed" in result.reason
+    # The nested group is itself a VerificationResult holding the two child results.
+    group = result.details["group_a"]
+    assert isinstance(group, VerificationResult)
+    assert isinstance(group.details, list)
+    assert [c.success for c in group.details] == [True, False]
+    assert "spec[1] failed" in group.reason
+
+
+def test_deeply_nested_list_of_lists_parses(mocker):
+    # list-of-lists previously raised ValidationError under the flat schema.
+    mocker.patch.object(PodHealthyVerifier, "verify", return_value=_ok())
+
+    spec = [[[{"type": "pod_healthy", "selector": "app=a"}]]]
+    result = VerifierAgent().wait_for_condition(spec, timeout_sec=60)
+
+    assert result.success is True
+
+
 def test_remaining_can_go_non_positive(mocker):
     # _remaining no longer clamps to 1: once the budget is spent it returns <= 0
     # so callers can short-circuit instead of borrowing another second.

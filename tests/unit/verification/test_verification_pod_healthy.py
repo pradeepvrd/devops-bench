@@ -86,6 +86,30 @@ def test_verify_wait_success(mocker):
     assert result.reason == "Condition met via kubectl wait"
 
 
+def test_verify_forwards_kubeconfig_to_wait(mocker):
+    mock_wait = mocker.patch(
+        "devops_bench.verification.verifiers.pod_healthy.wait",
+        return_value=_completed("ok"),
+    )
+
+    verifier = PodHealthyVerifier(selector="app=my-app", kubeconfig="/tmp/kc.yaml")
+    verifier.verify(timeout_sec=30)
+
+    assert mock_wait.call_args.kwargs["kubeconfig"] == "/tmp/kc.yaml"
+
+
+def test_get_pods_details_forwards_kubeconfig(mocker):
+    mock_get = mocker.patch(
+        "devops_bench.verification.verifiers.pod_healthy.get_json",
+        return_value={"items": []},
+    )
+
+    verifier = PodHealthyVerifier(selector="app=my-app", kubeconfig="/tmp/kc.yaml")
+    verifier._get_pods_details()
+
+    assert mock_get.call_args.kwargs["kubeconfig"] == "/tmp/kc.yaml"
+
+
 def test_verify_wait_failure_fallback_success(mocker):
     # kubectl wait fails, but the Running-phase fallback holds.
     mocker.patch(

@@ -47,7 +47,7 @@ class ScalingCompleteVerifier(BaseVerifier):
     min_replicas: int = 1
     namespace: str | None = None
 
-    def verify(self, timeout_sec: int) -> VerificationResult:
+    def verify(self, timeout_sec: float) -> VerificationResult:
         """Poll the deployment until it reaches ``min_replicas`` ready replicas.
 
         Args:
@@ -94,6 +94,7 @@ class ScalingCompleteVerifier(BaseVerifier):
                 "deployment",
                 self.deployment,
                 namespace=self.namespace,
+                kubeconfig=self.kubeconfig,
             )
         except SubprocessError as exc:
             stderr = (exc.stderr or "").strip()

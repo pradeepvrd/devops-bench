@@ -30,7 +30,7 @@ class VerifierAgent:
     def wait_for_condition(
         self,
         spec: VerificationSpec | dict | list,
-        timeout_sec: int = 120,
+        timeout_sec: float = 120,
     ) -> VerificationResult:
         """Wait for a spec to hold, recursing into compound specs.
 
@@ -66,6 +66,8 @@ class VerifierAgent:
                     results.append(sub_result)
                     overall_reason.append(f"spec[{i}] failed: {sub_result.reason}")
                     continue
+                # ``sub_spec`` is already a VerificationSpec after recursive
+                # parsing; wait_for_condition also re-wraps raw dict/list values.
                 sub_result = self.wait_for_condition(sub_spec, timeout_sec=remaining_timeout)
                 results.append(sub_result)
                 if not sub_result.success:
@@ -111,14 +113,14 @@ class VerifierAgent:
         return root.verify(timeout_sec)
 
     @staticmethod
-    def _remaining(start_time: float, timeout_sec: int) -> int:
+    def _remaining(start_time: float, timeout_sec: float) -> float:
         """Return the seconds left in the budget.
 
         May be zero or negative once the budget is exhausted; callers use that to
         short-circuit rather than running another member with a borrowed second.
         """
         elapsed = time.time() - start_time
-        return timeout_sec - int(elapsed)
+        return timeout_sec - elapsed
 
     @staticmethod
     def _timed_out_result(start_time: float) -> VerificationResult:

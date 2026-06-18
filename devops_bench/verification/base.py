@@ -47,10 +47,17 @@ class BaseVerifier(BaseModel, ABC):
     Concrete verifiers carry a ``type`` literal so they can participate in the
     discriminated :class:`~devops_bench.verification.spec.VerificationSpec`
     union, and implement :meth:`verify`.
+
+    Attributes:
+        kubeconfig: Optional path to a kubeconfig file, forwarded to the
+            ``devops_bench.k8s`` wrappers so a check can target a specific
+            cluster. When ``None`` the wrappers use the ambient kubeconfig.
     """
 
+    kubeconfig: str | None = None
+
     @abstractmethod
-    def verify(self, timeout_sec: int) -> VerificationResult:
+    def verify(self, timeout_sec: float) -> VerificationResult:
         """Run the check and report the outcome.
 
         Args:
