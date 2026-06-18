@@ -159,6 +159,47 @@ def test_process_query_tool_error_is_captured():
     assert "Error: kaboom" in contents[-1]["content"]
 
 
+def test_process_query_tool_request_without_mcp_client():
+    fc = [{"name": "do_thing", "args": {}, "id": "call-1"}]
+    client = _FakeLLMClient([_Response(text="", function_calls=fc)])
+    contents = [{"role": "user", "content": "hi"}]
+
+    # mcp_client is None (bench_use_mcp=False) but the model still asks for a tool.
+    asyncio.run(loop.process_query(client, contents, [], None, None))
+
+    assert contents[-1]["role"] == "tool"
+    assert contents[-1]["content"] == (
+        "Error: MCP client is not initialized; no tools are available."
+    )
+
+
+def test_process_query_aggregates_multiple_content_blocks():
+    fc = [{"name": "multi", "args": {}, "id": "call-1"}]
+    client = _FakeLLMClient([_Response(text="", function_calls=fc)])
+
+    class _MultiBlockMCP:
+        skill_resources = {}
+
+        async def call_tool(self, name, args):
+            blocks = [
+                type("C", (), {"text": "first block"})(),
+                type("C", (), {"text": "second block"})(),
+                type("C", (), {})(),  # no .text -> skipped
+            ]
+            return type("R", (), {"content": blocks})()
+
+    contents = [{"role": "user", "content": "hi"}]
+    asyncio.run(loop.process_query(client, contents, [], None, _MultiBlockMCP()))
+
+    assert contents[-1]["content"] == "first block\nsecond block"
+
+
+def test_extract_tool_text_falls_back_to_str():
+    # No content blocks -> stringify the whole result.
+    result = type("R", (), {"content": []})()
+    assert loop._extract_tool_text(result) == str(result)
+
+
 def test_run_api_agent_no_mcp_loops_to_completion():
     # Turn 1 requests a (no-op) tool-less response immediately to terminate.
     client = _FakeLLMClient([_Response(text="final answer", usage=_Usage())])
