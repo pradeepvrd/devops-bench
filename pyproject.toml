@@ -45,7 +45,8 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-genai>=2.6.0"]
 anthropic = ["anthropic>=0.104.1"]
-all = ["devops-bench[gemini,anthropic]"]
+ollama = ["openai>=1.0.0"]
+all = ["devops-bench[gemini,anthropic,ollama]"]
 
 [tool.hatch.version]
 path = "devops_bench/__init__.py"

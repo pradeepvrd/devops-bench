@@ -26,10 +26,11 @@ from devops_bench.models.base import MODELS, LLMClient, get_model
 
 def test_registry_has_known_providers():
     # Importing the adapter modules registers them under their canonical keys.
-    from devops_bench.models import anthropic, gemini  # noqa: F401
+    from devops_bench.models import anthropic, gemini, ollama  # noqa: F401
 
     assert MODELS.get("gemini") is gemini.GeminiClientAdapter
     assert MODELS.get("anthropic") is anthropic.AnthropicClientAdapter
+    assert MODELS.get("ollama") is ollama.OllamaClientAdapter
 
 
 def test_get_model_returns_gemini_adapter(mocker):
@@ -58,6 +59,15 @@ def test_get_model_returns_anthropic_adapter(mocker):
     client = get_model(provider="anthropic")
 
     assert isinstance(client, anthropic.AnthropicClientAdapter)
+
+
+def test_get_model_returns_ollama_adapter(mocker):
+    from devops_bench.models import ollama
+
+    mocker.patch.object(ollama, "AsyncOpenAI")
+    client = get_model(provider="ollama")
+
+    assert isinstance(client, ollama.OllamaClientAdapter)
 
 
 def test_get_model_is_case_insensitive(mocker):
