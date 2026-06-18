@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import threading
 from typing import Any
@@ -41,15 +42,17 @@ def run_chaos_command(
     command: str,
     chaos_active_event: threading.Event | None = None,
 ) -> str:
-    """Execute a single chaos shell command and return its combined output.
+    """Execute a single chaos command and return its combined output.
 
-    The command is a free-form shell string produced by the LLM (e.g. a
-    ``fortio load`` invocation). When the command is a load spike and an event
-    is supplied, the event is set so the harness can observe that load is
-    active before measuring impact.
+    The command is a single, non-piped command string produced by the LLM (e.g.
+    a ``fortio load`` invocation). It is tokenized with :func:`shlex.split` and
+    run shell-free, so shell features (pipes, redirection, ``$VAR``) are not
+    supported; a leading ``~`` in each token is expanded to the user's home.
+    When the command is a load spike and an event is supplied, the event is set
+    so the harness can observe that load is active before measuring impact.
 
     Args:
-        command: Shell command to execute.
+        command: Single command to execute (no shell pipelines or redirection).
         chaos_active_event: Optional event signaled when a load spike starts.
 
     Returns:
@@ -62,10 +65,12 @@ def run_chaos_command(
     try:
         _log.info("running chaos command: %s", command)
 
-        # The model emits shell strings (fortio pipelines, kubectl exec); split
-        # into argv so execution stays shell-free. Commands that genuinely need
-        # shell features would have to be handled explicitly; none do today.
-        argv = shlex.split(command)
+        # The model emits shell strings (e.g. a single fortio invocation); split
+        # into argv so execution stays shell-free. shlex.split does not expand
+        # ``~``, so expand each token's leading home to keep ``~/go/bin/fortio``
+        # style paths resolvable. Shell features (pipes, redirection, $VARS) are
+        # not supported by this argv executor.
+        argv = [os.path.expanduser(arg) for arg in shlex.split(command)]
 
         # Signal "load active" only once the command parses cleanly and we are
         # about to execute it, so a parse failure never falsely tells the harness
@@ -112,12 +117,21 @@ class GenerateLoadFault(Fault):
     def goal(self, spec: dict[str, Any]) -> str:
         """Build the planned-mode goal prompt for the LLM.
 
+        The fortio target URL is read from the spec (``target.service_url``,
+        rewritten by the harness to the local port-forward) so the spec field
+        drives the prompt rather than a hardcoded constant.
+
         Args:
             spec: The chaos task spec describing the load to generate.
 
         Returns:
             The goal prompt instructing the model to issue one fortio spike.
         """
+        # Imported here (not at module top) to keep the fault module free of the
+        # agent + models layer until injection actually runs.
+        from devops_bench.chaos.agent import target_url_from_spec
+
+        target_url = target_url_from_spec(spec)
         return (
             "Your goal is to execute the following GKE planned chaos engineering "
             "disruption action:\n"
@@ -125,8 +139,8 @@ class GenerateLoadFault(Fault):
             "Guidelines for execution:\n"
             "1. Use the 'fortio' tool to inject traffic into GKE.\n"
             "2. Note: GKE service target URLs (like *.svc.cluster.local) are "
-            "port-forwarded to 'http://localhost:8080' on the host, so run fortio "
-            "against http://localhost:8080 instead.\n"
+            f"port-forwarded to '{target_url}' on the host, so run fortio "
+            f"against {target_url} instead.\n"
             "Use your run_command tool to execute this disruption safely and effectively."
         )
 
@@ -152,9 +166,15 @@ class GenerateLoadFault(Fault):
 
         self._spec = dict(spec)
         # Deferred import keeps base/fault imports free of the agent + models layer.
-        from devops_bench.chaos.agent import ChaosAgent
+        from devops_bench.chaos.agent import (
+            ChaosAgent,
+            build_system_instruction,
+            target_url_from_spec,
+        )
 
         event = (context or {}).get("chaos_active_event")
-        agent = ChaosAgent(chaos_active_event=event)
+        # Inject the spec's target URL into both the goal and the system prompt.
+        system_instruction = build_system_instruction(target_url_from_spec(spec))
+        agent = ChaosAgent(chaos_active_event=event, system_instruction=system_instruction)
         output = agent.run(self.goal(spec))
         return {"status": "completed", "output": output}
