@@ -16,20 +16,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from importlib import resources
 from unittest.mock import MagicMock
 
 import pytest
 
-from devops_bench.metrics import outcome_validity, tool_invocation
+from devops_bench.metrics import _skills, outcome_validity, tool_invocation
 from devops_bench.metrics.tool_invocation import TOOL_INVOCATION_THRESHOLD
 
 
-def test_repo_root_resolution_points_at_skills():
-    # parents[2] from devops_bench/metrics/<file>.py is the repo root.
-    root = Path(outcome_validity.__file__).resolve().parents[2]
-    assert (root / "skills" / "outcome-validity-checklist.md").is_file()
-    assert (root / "skills" / "tool-invocation-skill.md").is_file()
+def test_skills_are_packaged_resources():
+    # The judge skills ship as package data under devops_bench.skills so they
+    # resolve via importlib.resources under pip install, not a repo-relative path.
+    pkg = resources.files(_skills.SKILLS_PACKAGE)
+    assert (pkg / "outcome-validity-checklist.md").is_file()
+    assert (pkg / "tool-invocation-skill.md").is_file()
 
 
 def test_load_outcome_criteria_reads_real_skill():
@@ -42,16 +43,9 @@ def test_load_tool_criteria_reads_real_skill():
     assert "Evaluation Criteria" in text
 
 
-def test_load_outcome_criteria_missing(mocker):
-    mocker.patch.object(outcome_validity, "_REPO_ROOT", Path("/nonexistent-root"))
+def test_load_skill_text_missing_raises():
     with pytest.raises(FileNotFoundError):
-        outcome_validity.load_outcome_criteria()
-
-
-def test_load_tool_criteria_missing(mocker):
-    mocker.patch.object(tool_invocation, "_REPO_ROOT", Path("/nonexistent-root"))
-    with pytest.raises(FileNotFoundError):
-        tool_invocation.load_tool_criteria()
+        _skills.load_skill_text("does-not-exist.md")
 
 
 def test_build_outcome_validity_metric(mocker):
