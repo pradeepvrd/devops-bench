@@ -103,8 +103,8 @@ def get_model(
     environment variable, defaulting to ``"gemini"``.
 
     Args:
-        provider: Registry key such as ``"gemini"``/``"google"`` or
-            ``"anthropic"``. Case-insensitive.
+        provider: Registry key such as ``"gemini"``/``"google"``,
+            ``"anthropic"``, or ``"ollama"``. Case-insensitive.
         model_name: Optional model override passed to the adapter; when omitted
             the adapter reads ``AGENT_MODEL`` (or its own default).
         **kwargs: Extra keyword arguments forwarded to the adapter constructor.
