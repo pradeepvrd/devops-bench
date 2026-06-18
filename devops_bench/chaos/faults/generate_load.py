@@ -56,17 +56,24 @@ def run_chaos_command(
         A string combining stdout and stderr, or an ``Error:`` description if
         the command could not be run.
     """
+    if not command.strip():
+        return "Error: command string is empty"
+
     try:
         _log.info("running chaos command: %s", command)
-
-        if chaos_active_event is not None and _LOAD_MARKER in command:
-            _log.info("load spike detected; signaling harness via chaos event")
-            chaos_active_event.set()
 
         # The model emits shell strings (fortio pipelines, kubectl exec); split
         # into argv so execution stays shell-free. Commands that genuinely need
         # shell features would have to be handled explicitly; none do today.
         argv = shlex.split(command)
+
+        # Signal "load active" only once the command parses cleanly and we are
+        # about to execute it, so a parse failure never falsely tells the harness
+        # that load is live.
+        if chaos_active_event is not None and _LOAD_MARKER in command:
+            _log.info("load spike detected; signaling harness via chaos event")
+            chaos_active_event.set()
+
         completed = run(argv, check=False, timeout=_COMMAND_TIMEOUT)
         return f"Stdout:\n{completed.stdout}\nStderr:\n{completed.stderr}"
     except Exception as exc:  # noqa: BLE001 - surface any failure back to the LLM

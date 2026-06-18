@@ -132,13 +132,17 @@ class ChaosAgent:
                 assistant_message["tool_calls"] = function_calls
             contents.append(assistant_message)
 
+            # Retain the latest text on every turn so a tool call on the final
+            # turn (or the turn cap) does not discard the model's accompanying
+            # summary.
+            final_text = text
+
             if not function_calls:
-                final_text = text
                 _log.info("chaos agent finished: no further tool calls")
                 break
 
             for call in function_calls:
-                result = self._execute_tool(call.get("name"), call.get("args") or {})
+                result = self._execute_tool(call.get("name"), call.get("args"))
                 contents.append(
                     {
                         "role": "tool",
@@ -152,16 +156,18 @@ class ChaosAgent:
 
         return final_text
 
-    def _execute_tool(self, name: str | None, args: dict[str, Any]) -> str:
+    def _execute_tool(self, name: str | None, args: Any) -> str:
         """Dispatch a model tool call to its implementation.
 
         Args:
             name: Requested tool name.
-            args: Tool arguments from the model.
+            args: Tool arguments from the model; expected to be an object (dict).
 
         Returns:
             The tool's textual result, or an error description.
         """
+        if not isinstance(args, dict):
+            return "Error: tool args must be an object"
         if name == RUN_COMMAND_TOOL.name:
             command = args.get("command", "")
             return run_chaos_command(command, self._chaos_active_event)
