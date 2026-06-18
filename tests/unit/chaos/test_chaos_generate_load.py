@@ -85,6 +85,27 @@ def test_run_chaos_command_returns_error_string_on_exception(mocker):
     assert "boom" in result
 
 
+def test_run_chaos_command_empty_command_guard(mocker):
+    mock_run = mocker.patch.object(generate_load, "run")
+
+    for empty in ("", "   ", "\n\t"):
+        assert run_chaos_command(empty) == "Error: command string is empty"
+    mock_run.assert_not_called()
+
+
+def test_run_chaos_command_does_not_set_event_on_parse_failure(mocker):
+    mock_run = mocker.patch.object(generate_load, "run")
+    event = threading.Event()
+
+    # Unbalanced quote: contains the load marker but fails shlex.split, so the
+    # command never executes and the event must not be signaled.
+    result = run_chaos_command('fortio load "unterminated', event)
+
+    assert result.startswith("Error:")
+    assert not event.is_set()
+    mock_run.assert_not_called()
+
+
 def test_inject_rejects_wrong_type():
     fault = GenerateLoadFault()
     with pytest.raises(ValueError):

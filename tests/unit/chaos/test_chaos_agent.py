@@ -80,14 +80,16 @@ def test_run_finishes_immediately_without_tool_calls(mocker):
     mock_cmd.assert_not_called()
 
 
-def test_run_stops_at_turn_limit(mocker):
+def test_run_stops_at_turn_limit_retains_last_text(mocker):
     mocker.patch.object(agent_module, "run_chaos_command", return_value="out")
     mocker.patch.object(agent_module, "_MAX_TURNS", 3)
-    # Always returns a tool call so the loop must hit the cap.
+    # Always returns a tool call so the loop must hit the cap; the model also
+    # emits text on every turn, which must be retained even though the final
+    # turn still carries a tool call.
     client = mocker.MagicMock()
     client.format_tools.return_value = "T"
     client.generate_content = mocker.AsyncMock(return_value="resp")
-    client.get_text_content.return_value = ""
+    client.get_text_content.return_value = "still working"
     client.extract_function_calls.return_value = [
         {"name": "run_command", "args": {"command": "fortio load x"}, "id": "c"}
     ]
@@ -95,7 +97,8 @@ def test_run_stops_at_turn_limit(mocker):
     chaos_agent = ChaosAgent(client=client)
     result = chaos_agent.run("loop forever")
 
-    assert result == ""
+    # Final-turn text is preserved despite the accompanying tool call.
+    assert result == "still working"
     assert client.generate_content.await_count == 3
 
 
@@ -106,3 +109,12 @@ def test_unknown_tool_returns_error(mocker):
     result = chaos_agent._execute_tool("mystery", {})
 
     assert result.startswith("Error: unknown tool")
+
+
+def test_non_dict_args_returns_error(mocker):
+    client = mocker.MagicMock()
+    chaos_agent = ChaosAgent(client=client)
+
+    for bad_args in (None, "fortio load x", ["fortio"], 42):
+        result = chaos_agent._execute_tool("run_command", bad_args)
+        assert result == "Error: tool args must be an object"
