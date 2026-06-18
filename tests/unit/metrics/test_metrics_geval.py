@@ -100,6 +100,20 @@ def test_generate_runs_async(mocker):
     assert judge.generate("prompt") == "sync result"
 
 
+def test_generate_is_loop_aware(mocker):
+    # When a loop is already running, generate() must not call asyncio.run()
+    # re-entrantly; it offloads to a worker thread and still returns the text.
+    import asyncio
+
+    client = _fake_client(text="loop-safe result")
+    judge = ModelLayerJudge(client=client)
+
+    async def _call_from_running_loop():
+        return judge.generate("prompt")
+
+    assert asyncio.run(_call_from_running_loop()) == "loop-safe result"
+
+
 def test_get_judge_model_passes_through(mocker):
     get_model = mocker.patch.object(geval, "get_model")
     get_model.return_value = _fake_client(model_name="gm")

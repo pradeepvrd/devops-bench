@@ -19,6 +19,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from devops_bench.metrics import grounding
 from devops_bench.metrics.grounding import (
     calculate_doc_retrieval_rate,
@@ -56,6 +58,17 @@ def test_retrieval_rate_partial():
 def test_retrieval_rate_no_match():
     docs = [{"doc_name": "GuideA", "url": "http://a"}]
     assert calculate_doc_retrieval_rate(docs, [{"action": "nothing here"}]) == 0.0
+
+
+def test_retrieval_rate_tolerates_missing_name_and_url():
+    # Missing/None doc_name and url must not raise AttributeError.
+    docs = [
+        {"url": "http://a"},  # no doc_name
+        {"doc_name": None, "url": None},  # both None
+        {"doc_name": "GuideC", "url": "http://c"},
+    ]
+    trajectory = [{"action": "read guidec via http://c"}]
+    assert calculate_doc_retrieval_rate(docs, trajectory) == pytest.approx(1 / 3)
 
 
 # --- evaluate_documentation_grounding (GEval mocked) --------------------------
@@ -145,3 +158,29 @@ def test_grounding_none_applied_scores_zero(mocker):
 
     assert scores["GroundingAccuracy"]["score"] == 0.0
     assert scores["ParameterRecallAccuracy"] == 0.0
+
+
+def test_grounding_dedups_shared_constraint_text(mocker):
+    # Two guides share the same constraint text; it must collapse to one metric
+    # so a perfect 5.0 (applied == unique total) is reachable.
+    mocker.patch.object(grounding, "GEval")
+    docs = [
+        {"constraints": [{"text": "use TLS", "critical": True}]},
+        {"constraints": [{"text": "use TLS", "critical": True}]},
+    ]
+    scores: dict = {}
+    calls = {"n": 0}
+
+    def _one_metric(cases, metrics):
+        calls["n"] += 1
+        return _metric_result("Doc Constraint: use TLS", 5.0, True)
+
+    mocker.patch.object(grounding, "evaluate", side_effect=_one_metric)
+
+    evaluate_documentation_grounding(docs, MagicMock(), MagicMock(), scores)
+
+    # Deduped: a single metric evaluated once, and the perfect score is reachable.
+    assert calls["n"] == 1
+    assert scores["GroundingAccuracy"]["score"] == 5.0
+    assert scores["GroundingAccuracy"]["success"] is True
+    assert scores["ParameterRecallAccuracy"] == 1.0
