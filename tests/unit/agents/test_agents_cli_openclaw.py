@@ -23,7 +23,7 @@ import subprocess
 import pytest
 
 from devops_bench.agents.cli import openclaw
-from devops_bench.core import SubprocessError
+from devops_bench.core import ConfigError, SubprocessError
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +33,10 @@ def _no_observe(mocker):
 
 def _completed(stdout: str) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr="")
+
+
+# Minimal env that satisfies the SSH runner's required-config check.
+_SSH_ENV = {"OPENCLAW_SSH_USER": "tester", "OPENCLAW_VM_HOST": "vm.example.com"}
 
 
 def test_strip_ansi():
@@ -116,7 +120,7 @@ def test_run_openclaw_agent_ssh_success(mocker):
         "run",
         side_effect=[_completed(agent_stdout), _completed(session_stdout)],
     )
-    mocker.patch.dict("os.environ", {}, clear=True)
+    mocker.patch.dict("os.environ", _SSH_ENV, clear=True)
 
     result = openclaw.run_openclaw_agent("do a thing", agent_name="operator")
 
@@ -134,7 +138,7 @@ def test_run_openclaw_agent_ssh_error(mocker):
         "run",
         side_effect=SubprocessError(["ssh"], returncode=255, stdout="o", stderr="conn refused"),
     )
-    mocker.patch.dict("os.environ", {}, clear=True)
+    mocker.patch.dict("os.environ", _SSH_ENV, clear=True)
 
     result = openclaw.run_openclaw_agent("p")
 
@@ -145,7 +149,7 @@ def test_run_openclaw_agent_ssh_error(mocker):
 
 def test_run_openclaw_agent_ssh_quotes_prompt_and_agent(mocker):
     mock_run = mocker.patch.object(openclaw, "run", return_value=_completed("no session here"))
-    mocker.patch.dict("os.environ", {}, clear=True)
+    mocker.patch.dict("os.environ", _SSH_ENV, clear=True)
 
     # Prompt with a single quote + spaces would break naive '{prompt}' interpolation.
     openclaw.run_openclaw_agent("delete the 'prod' pod now", agent_name="op erator")
@@ -163,13 +167,33 @@ def test_run_openclaw_agent_ssh_quotes_prompt_and_agent(mocker):
 def test_run_openclaw_agent_ssh_handles_oserror(mocker):
     # ssh binary missing -> OSError, which core.subprocess.run does not wrap.
     mocker.patch.object(openclaw, "run", side_effect=FileNotFoundError("ssh not found"))
-    mocker.patch.dict("os.environ", {}, clear=True)
+    mocker.patch.dict("os.environ", _SSH_ENV, clear=True)
 
     result = openclaw.run_openclaw_agent("p")
 
     assert result["output"].startswith("Error:")
     assert "ssh not found" in result["output"]
     assert result["trajectory"] == []
+
+
+def test_run_openclaw_agent_ssh_requires_user(mocker):
+    # No silent sandbox default: missing SSH user raises ConfigError, not a
+    # connection to some other host. run() must never be reached.
+    mock_run = mocker.patch.object(openclaw, "run")
+    mocker.patch.dict("os.environ", {"OPENCLAW_VM_HOST": "vm.example.com"}, clear=True)
+
+    with pytest.raises(ConfigError):
+        openclaw.run_openclaw_agent("p")
+    mock_run.assert_not_called()
+
+
+def test_run_openclaw_agent_ssh_requires_host(mocker):
+    mock_run = mocker.patch.object(openclaw, "run")
+    mocker.patch.dict("os.environ", {"OPENCLAW_SSH_USER": "tester"}, clear=True)
+
+    with pytest.raises(ConfigError):
+        openclaw.run_openclaw_agent("p")
+    mock_run.assert_not_called()
 
 
 def test_run_openclaw_agent_local_success(mocker):

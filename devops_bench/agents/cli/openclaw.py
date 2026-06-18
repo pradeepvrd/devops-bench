@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import getpass
 import json
 import os
 import re
@@ -25,7 +24,7 @@ import subprocess
 import time
 
 from devops_bench.agents.base import AGENTS, AgentHarness
-from devops_bench.core import SubprocessError, get_bool, get_env, get_logger
+from devops_bench.core import SubprocessError, get_bool, get_env, get_logger, require_env
 from devops_bench.core.subprocess import run
 
 __all__ = [
@@ -152,8 +151,11 @@ def _parse_openclaw_session(session_content: str) -> tuple[dict, list]:
 def run_openclaw_agent(prompt: str, context: dict | None = None, agent_name: str = "main") -> dict:
     """Run the OpenClaw agent on a GCE VM via SSH.
 
-    Connection details and the model are read from the environment
-    (``OPENCLAW_SSH_*``, ``GCP_PROJECT_ID``, ``AGENT_MODEL``/``AGENT_PROVIDER``).
+    The SSH target and the model are read from the environment. The SSH user
+    (``OPENCLAW_SSH_USER``) and host (``OPENCLAW_VM_HOST``) are required — there
+    are no built-in defaults, so the runner never silently targets some other
+    host. The key path (``OPENCLAW_SSH_KEY``) defaults to the standard gcloud
+    key. The model flows from ``AGENT_MODEL``/``AGENT_PROVIDER``.
 
     Args:
         prompt: Task prompt for the agent.
@@ -163,19 +165,16 @@ def run_openclaw_agent(prompt: str, context: dict | None = None, agent_name: str
     Returns:
         The standardized result dict. On a non-zero ``oc`` exit the dict carries
         the error text in ``output`` and empty trajectory/token fields.
+
+    Raises:
+        ConfigError: If ``OPENCLAW_SSH_USER`` or ``OPENCLAW_VM_HOST`` is unset.
     """
     from deepeval.tracing import observe
 
     @observe()
     def _run() -> dict:
-        current_user = getpass.getuser()
-        project_id = get_env("GCP_PROJECT_ID", "simrankaurk-gke-dev")
-
-        ssh_user = get_env("OPENCLAW_SSH_USER", f"{current_user}_google_com")
-        vm_host = get_env(
-            "OPENCLAW_VM_HOST",
-            f"nic0.claw-ubuntu.us-central1-a.c.{project_id}.internal.gcpnode.com",
-        )
+        ssh_user = require_env("OPENCLAW_SSH_USER")
+        vm_host = require_env("OPENCLAW_VM_HOST")
         ssh_key = get_env("OPENCLAW_SSH_KEY", os.path.expanduser("~/.ssh/google_compute_engine"))
 
         # shlex.quote every value interpolated into the remote shell string so

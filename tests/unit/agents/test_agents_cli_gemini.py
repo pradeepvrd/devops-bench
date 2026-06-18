@@ -102,6 +102,35 @@ def test_extract_trajectory_missing_dir_returns_empty(mocker):
     assert res == {"trajectory": [], "skills": []}
 
 
+def test_extract_trajectory_skill_parent_folder_fallback(mocker):
+    # A SKILL.md path with no "skills" dir: the skill name is the parent folder.
+    session_line = json.dumps(
+        {
+            "type": "gemini",
+            "toolCalls": [
+                {
+                    "name": "read_file",
+                    "args": {"file_path": "/plugin/my-skill/SKILL.md"},
+                    "status": "done",
+                },
+                {
+                    "name": "read_file",
+                    "args": {"file_path": "/repo/skills/other-skill/guide.md"},
+                    "status": "done",
+                },
+            ],
+        }
+    )
+    mocker.patch("os.path.exists", return_value=True)
+    mocker.patch("glob.glob", return_value=["/fake/session-x-abc.jsonl"])
+    mocker.patch("builtins.open", mocker.mock_open(read_data=session_line))
+
+    res = gemini.extract_trajectory_from_session("abc")
+
+    assert sorted(res["skills"]) == ["my-skill", "other-skill"]
+    assert len(res["trajectory"]) == 2
+
+
 def test_run_cli_agent_gemini_success(mocker):
     payload = json.dumps(
         {"response": "done", "session_id": None, "stats": {"models": {}, "tools": {}}}
