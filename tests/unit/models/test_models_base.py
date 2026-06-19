@@ -26,10 +26,10 @@ from devops_bench.models.base import MODELS, LLMClient, get_model
 
 def test_registry_has_known_providers():
     # Importing the adapter modules registers them under their canonical keys.
-    from devops_bench.models import anthropic, gemini, ollama  # noqa: F401
+    from devops_bench.models import claude, gemini, ollama  # noqa: F401
 
     assert MODELS.get("gemini") is gemini.GeminiClientAdapter
-    assert MODELS.get("anthropic") is anthropic.AnthropicClientAdapter
+    assert MODELS.get("claude") is claude.ClaudeClientAdapter
     assert MODELS.get("ollama") is ollama.OllamaClientAdapter
 
 
@@ -52,13 +52,22 @@ def test_get_model_resolves_google_alias(mocker):
     assert isinstance(client, gemini.GeminiClientAdapter)
 
 
-def test_get_model_returns_anthropic_adapter(mocker):
-    from devops_bench.models import anthropic
+def test_get_model_returns_claude_adapter(mocker):
+    from devops_bench.models import claude
 
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    client = get_model(provider="claude")
+
+    assert isinstance(client, claude.ClaudeClientAdapter)
+
+
+def test_get_model_resolves_anthropic_alias(mocker):
+    from devops_bench.models import claude
+
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
     client = get_model(provider="anthropic")
 
-    assert isinstance(client, anthropic.AnthropicClientAdapter)
+    assert isinstance(client, claude.ClaudeClientAdapter)
 
 
 def test_get_model_returns_ollama_adapter(mocker):
@@ -71,12 +80,12 @@ def test_get_model_returns_ollama_adapter(mocker):
 
 
 def test_get_model_is_case_insensitive(mocker):
-    from devops_bench.models import anthropic
+    from devops_bench.models import claude
 
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    client = get_model(provider="ANTHROPIC")
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    client = get_model(provider="CLAUDE")
 
-    assert isinstance(client, anthropic.AnthropicClientAdapter)
+    assert isinstance(client, claude.ClaudeClientAdapter)
 
 
 def test_get_model_defaults_to_gemini(mocker):
@@ -90,13 +99,13 @@ def test_get_model_defaults_to_gemini(mocker):
 
 
 def test_get_model_reads_provider_from_env(mocker):
-    from devops_bench.models import anthropic
+    from devops_bench.models import claude
 
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    mocker.patch.dict(os.environ, {"AGENT_PROVIDER": "anthropic"}, clear=True)
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    mocker.patch.dict(os.environ, {"AGENT_PROVIDER": "claude"}, clear=True)
     client = get_model()
 
-    assert isinstance(client, anthropic.AnthropicClientAdapter)
+    assert isinstance(client, claude.ClaudeClientAdapter)
 
 
 def test_get_model_passes_model_name(mocker):
@@ -109,7 +118,7 @@ def test_get_model_passes_model_name(mocker):
 
 
 def test_get_model_unknown_provider_raises(mocker):
-    from devops_bench.models import anthropic, gemini  # noqa: F401
+    from devops_bench.models import claude, gemini  # noqa: F401
 
     with pytest.raises(NotRegisteredError):
         get_model(provider="does-not-exist")

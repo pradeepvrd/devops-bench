@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the Anthropic (Claude) adapter and its backend selection."""
+"""Tests for the Claude adapter and its backend selection."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from devops_bench.core.errors import ConfigError, MissingDependencyError
-from devops_bench.models import anthropic
-from devops_bench.models.anthropic import AnthropicClientAdapter
+from devops_bench.models import claude
+from devops_bench.models.claude import ClaudeClientAdapter
 
 
 def _make_tool(name, description, input_schema):
@@ -36,79 +36,79 @@ def _make_tool(name, description, input_schema):
 
 
 def test_init_selects_vertex_from_project(mocker):
-    client_cls = mocker.patch.object(anthropic, "AsyncAnthropicVertex")
+    client_cls = mocker.patch.object(claude, "AsyncAnthropicVertex")
     mocker.patch.dict(
         os.environ, {"GCP_PROJECT_ID": "proj", "GCP_VERTEX_LOCATION": "us-east5"}, clear=True
     )
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
 
     client_cls.assert_called_once_with(region="us-east5", project_id="proj")
     assert adapter.model_name == "claude-sonnet-4-5@20250929"
 
 
 def test_init_defaults_to_vertex_and_warns(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    warn = mocker.patch.object(anthropic._log, "warning")
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    warn = mocker.patch.object(claude._log, "warning")
     mocker.patch.dict(os.environ, {}, clear=True)
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
 
     warn.assert_called_once()
     assert adapter.model_name == "claude-sonnet-4-5@20250929"
 
 
 def test_init_selects_api_from_key(mocker):
-    client_cls = mocker.patch.object(anthropic, "AsyncAnthropic")
+    client_cls = mocker.patch.object(claude, "AsyncAnthropic")
     mocker.patch.dict(os.environ, {"AGENT_API_KEY": "sk-test"}, clear=True)
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
 
     client_cls.assert_called_once_with(api_key="sk-test")
     assert adapter.model_name == "claude-sonnet-4-5"
 
 
 def test_init_api_key_takes_precedence_over_project(mocker):
-    api_cls = mocker.patch.object(anthropic, "AsyncAnthropic")
-    vertex_cls = mocker.patch.object(anthropic, "AsyncAnthropicVertex")
+    api_cls = mocker.patch.object(claude, "AsyncAnthropic")
+    vertex_cls = mocker.patch.object(claude, "AsyncAnthropicVertex")
     mocker.patch.dict(
         os.environ, {"AGENT_API_KEY": "sk-test", "GCP_PROJECT_ID": "proj"}, clear=True
     )
 
-    AnthropicClientAdapter()
+    ClaudeClientAdapter()
 
     api_cls.assert_called_once()
     vertex_cls.assert_not_called()
 
 
 def test_init_selects_bedrock_from_aws_region(mocker):
-    client_cls = mocker.patch.object(anthropic, "AsyncAnthropicBedrock")
+    client_cls = mocker.patch.object(claude, "AsyncAnthropicBedrock")
     mocker.patch.dict(
         os.environ, {"AWS_REGION": "us-west-2", "AGENT_MODEL": "anthropic.claude-x"}, clear=True
     )
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
 
     client_cls.assert_called_once_with(aws_region="us-west-2")
     assert adapter.model_name == "anthropic.claude-x"
 
 
 def test_init_bedrock_requires_model(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicBedrock")
+    mocker.patch.object(claude, "AsyncAnthropicBedrock")
     mocker.patch.dict(os.environ, {"AWS_REGION": "us-west-2"}, clear=True)
 
     with pytest.raises(ConfigError):
-        AnthropicClientAdapter()
+        ClaudeClientAdapter()
 
 
 def test_init_backend_override_forces_vertex(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropic")
-    vertex_cls = mocker.patch.object(anthropic, "AsyncAnthropicVertex")
+    mocker.patch.object(claude, "AsyncAnthropic")
+    vertex_cls = mocker.patch.object(claude, "AsyncAnthropicVertex")
     mocker.patch.dict(
         os.environ, {"AGENT_API_KEY": "sk-test", "ANTHROPIC_BACKEND": "vertex"}, clear=True
     )
 
-    AnthropicClientAdapter()
+    ClaudeClientAdapter()
 
     vertex_cls.assert_called_once()
 
@@ -117,22 +117,22 @@ def test_init_backend_override_invalid_raises(mocker):
     mocker.patch.dict(os.environ, {"ANTHROPIC_BACKEND": "nope"}, clear=True)
 
     with pytest.raises(ConfigError):
-        AnthropicClientAdapter()
+        ClaudeClientAdapter()
 
 
 def test_init_without_sdk_raises(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropic", None)
+    mocker.patch.object(claude, "AsyncAnthropic", None)
 
     with pytest.raises(MissingDependencyError):
-        AnthropicClientAdapter()
+        ClaudeClientAdapter()
 
 
 # --- format_tools -------------------------------------------------------------
 
 
 def test_format_tools_shape(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    adapter = AnthropicClientAdapter()
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    adapter = ClaudeClientAdapter()
     schema = {"type": "object", "properties": {}}
 
     result = adapter.format_tools([_make_tool("t", "d", schema)])
@@ -144,8 +144,8 @@ def test_format_tools_shape(mocker):
 
 
 def test_extract_function_calls(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    adapter = AnthropicClientAdapter()
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    adapter = ClaudeClientAdapter()
 
     response = SimpleNamespace(
         content=[
@@ -163,8 +163,8 @@ def test_extract_function_calls(mocker):
 
 
 def test_get_text_content_concatenates(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    adapter = AnthropicClientAdapter()
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    adapter = ClaudeClientAdapter()
 
     response = SimpleNamespace(
         content=[
@@ -181,12 +181,12 @@ def test_get_text_content_concatenates(mocker):
 
 
 def test_generate_content_passes_max_tokens_and_system(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
     mocker.patch.dict(os.environ, {}, clear=True)
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
     tools = adapter.format_tools([_make_tool("t", "d", {"type": "object"})])
 
     result = asyncio.run(
@@ -204,24 +204,24 @@ def test_generate_content_passes_max_tokens_and_system(mocker):
 
 
 def test_generate_content_default_max_tokens(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
     mocker.patch.dict(os.environ, {}, clear=True)
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert create.await_args.kwargs["max_tokens"] == 16000
 
 
 def test_generate_content_env_overrides_max_tokens(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
     mocker.patch.dict(os.environ, {"AGENT_MAX_TOKENS": "12345"}, clear=True)
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert adapter.max_tokens == 12345
@@ -229,12 +229,12 @@ def test_generate_content_env_overrides_max_tokens(mocker):
 
 
 def test_generate_content_arg_overrides_env_max_tokens(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
     mocker.patch.dict(os.environ, {"AGENT_MAX_TOKENS": "12345"}, clear=True)
 
-    adapter = AnthropicClientAdapter(max_tokens=999)
+    adapter = ClaudeClientAdapter(max_tokens=999)
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert adapter.max_tokens == 999
@@ -242,30 +242,30 @@ def test_generate_content_arg_overrides_env_max_tokens(mocker):
 
 
 def test_generate_content_omits_system_when_empty(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], None))
 
     assert "system" not in create.await_args.kwargs
 
 
 def test_generate_content_omits_tools_when_empty(mocker):
-    client = mocker.patch.object(anthropic, "AsyncAnthropicVertex").return_value
+    client = mocker.patch.object(claude, "AsyncAnthropicVertex").return_value
     create = AsyncMock(return_value="resp")
     client.messages.create = create
 
-    adapter = AnthropicClientAdapter()
+    adapter = ClaudeClientAdapter()
     asyncio.run(adapter.generate_content([{"role": "user", "content": "hi"}], [], "sys"))
 
     assert "tools" not in create.await_args.kwargs
 
 
 def test_convert_messages_tool_calls_and_results(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    adapter = AnthropicClientAdapter()
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    adapter = ClaudeClientAdapter()
 
     contents = [
         {"role": "user", "content": "do it"},
@@ -295,8 +295,8 @@ def test_convert_messages_tool_calls_and_results(mocker):
 
 
 def test_convert_messages_groups_parallel_tool_results(mocker):
-    mocker.patch.object(anthropic, "AsyncAnthropicVertex")
-    adapter = AnthropicClientAdapter()
+    mocker.patch.object(claude, "AsyncAnthropicVertex")
+    adapter = ClaudeClientAdapter()
 
     contents = [
         {"role": "user", "content": "do it"},
