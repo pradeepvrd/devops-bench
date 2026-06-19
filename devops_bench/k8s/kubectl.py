@@ -23,9 +23,8 @@ from devops_bench.core.subprocess import CompletedProcess, run
 
 __all__ = [
     "apply",
-    "get_json",
+    "get_resource",
     "rollout_status",
-    "scale",
     "wait",
 ]
 
@@ -119,7 +118,7 @@ def wait(
     return _run_kubectl(argv, kubeconfig)
 
 
-def get_json(
+def get_resource(
     resource_type: str,
     name: str | None = None,
     *,
@@ -177,31 +176,6 @@ def apply(
         SubprocessError: If kubectl exits non-zero or times out.
     """
     argv = ["kubectl", "apply", "-f", path, *_namespace_args(namespace)]
-    return _run_kubectl(argv, kubeconfig)
-
-
-def scale(
-    resource: str,
-    replicas: int,
-    *,
-    namespace: str | None = None,
-    kubeconfig: KubeconfigSource = None,
-) -> CompletedProcess:
-    """Set the replica count of a resource via ``kubectl scale``.
-
-    Args:
-        resource: Resource reference, e.g. ``"deployment/web"``.
-        replicas: Desired replica count.
-        namespace: Optional namespace (``-n``).
-        kubeconfig: Kubeconfig path or context-like object.
-
-    Returns:
-        The completed process.
-
-    Raises:
-        SubprocessError: If kubectl exits non-zero or times out.
-    """
-    argv = ["kubectl", "scale", f"--replicas={replicas}", resource, *_namespace_args(namespace)]
     return _run_kubectl(argv, kubeconfig)
 
 
