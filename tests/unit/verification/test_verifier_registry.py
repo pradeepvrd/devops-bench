@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Literal
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from devops_bench.verification import (
     VERIFIERS,
@@ -78,3 +78,36 @@ def test_unknown_type_lists_registered_keys_in_error():
     assert "definitely_not_registered" in msg
     # At least one of the builtins must show up in the listed keys.
     assert "pod_healthy" in msg or "sequence" in msg
+
+
+class _UnregisteredVerifier(BaseModel):
+    """A pydantic model that walks and talks like a verifier but is NOT registered."""
+
+    type: Literal["totally_off_the_books"] = "totally_off_the_books"
+    payload: str = "x"
+
+
+def test_already_parsed_unregistered_basemodel_is_rejected():
+    # ``parse_node`` used to bypass any already-parsed ``BaseModel`` outright,
+    # which let an unregistered model slip through. Guard now requires the
+    # concrete class to be in ``VERIFIERS``; an unregistered instance must
+    # raise the same ``ValidationError`` surface as an unknown ``type`` string.
+    instance = _UnregisteredVerifier(payload="x")
+    with pytest.raises(ValidationError) as excinfo:
+        VerificationSpec(instance)
+    assert "not a registered verifier" in str(excinfo.value)
+
+
+def test_unregistered_basemodel_as_checks_child_is_rejected():
+    # The same guard must fire for compound children: an unregistered
+    # pre-parsed model handed in as a ``checks`` entry must not silently land
+    # in a sequence/parallel node.
+    rogue = _UnregisteredVerifier(payload="x")
+    with pytest.raises(ValidationError) as excinfo:
+        VerificationSpec(
+            {
+                "type": "sequence",
+                "checks": [rogue],
+            }
+        )
+    assert "not a registered verifier" in str(excinfo.value)

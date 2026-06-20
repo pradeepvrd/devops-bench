@@ -52,12 +52,23 @@ CHECKLIST_THRESHOLD = 0.8
 # of :func:`evaluate_metrics_batch`. Importing the metrics package itself stays
 # light (CONVENTIONS.md §8); these imports happen at call time so ``deepeval``
 # is never pulled by ``import devops_bench.metrics``.
-_BUILTIN_METRIC_MODULES = (
-    "devops_bench.metrics.outcome_validity",
-    "devops_bench.metrics.tool_invocation",
-    "devops_bench.metrics.grounding",
-    "devops_bench.metrics.chaos_metrics",
-    "devops_bench.metrics.pipeline",  # registers ChecklistMetric (this module)
+# Order matters: METRICS is a dict, so iteration order = insertion order =
+# the order keys land in res["scores"] and thence in results.json. This
+# list is pinned to the legacy ordering (outcome -> tool -> checklist ->
+# grounding -> chaos) so D3 (results.json shape stability) holds across the
+# extraction. pipeline itself is in the list because it carries the
+# @METRICS.register("checklist") decorator; re-importing this module while
+# it is already in sys.modules is a no-op, the registration ran at first
+# import of the module.
+_BUILTIN_METRIC_ORDER: tuple[tuple[str, str], ...] = (
+    ("devops_bench.metrics.outcome_validity", "outcome_validity"),
+    ("devops_bench.metrics.tool_invocation", "tool_invocation"),
+    # ``pipeline`` itself registers ``ChecklistMetric`` at module load;
+    # re-importing while it is already in ``sys.modules`` is a no-op and the
+    # decorator has long since fired.
+    ("devops_bench.metrics.pipeline", "checklist"),
+    ("devops_bench.metrics.grounding", "grounding"),
+    ("devops_bench.metrics.chaos_metrics", "chaos"),
 )
 
 
@@ -237,7 +248,7 @@ def _load_builtin_metric_modules() -> None:
     metric modules are imported here, at call time, instead of at package
     import. Already-imported modules are no-ops.
     """
-    for module in _BUILTIN_METRIC_MODULES:
+    for module, _ in _BUILTIN_METRIC_ORDER:
         importlib.import_module(module)
 
 
@@ -269,7 +280,12 @@ def evaluate_metrics_batch(
     if use_mcp is None:
         use_mcp = get_bool("BENCH_USE_MCP", True)
 
-    evaluators = [cls() for cls in METRICS.values()]
+    builtin_keys = [key for _, key in _BUILTIN_METRIC_ORDER]
+    builtin_set = set(builtin_keys)
+    # Builtin metrics in the pinned (results.json) order, then any third-party
+    # registrations in registry insertion order.
+    ordered_keys = builtin_keys + [k for k in METRICS if k not in builtin_set]
+    evaluators = [METRICS[k]() for k in ordered_keys]
 
     for res in detailed_results:
         ctx = _build_context(res, judge_model, use_mcp)

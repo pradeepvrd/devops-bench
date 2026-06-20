@@ -237,3 +237,73 @@ def test_batch_invokes_grounding_and_chaos(mocker):
     retrieval.assert_called_once()
     chaos.assert_called_once()
     assert results[0]["scores"]["DocRetrievalRate"] == 0.5
+
+
+def test_batch_score_insertion_order_matches_legacy_results_json(mocker):
+    # D3: ``res["scores"]`` insertion order lands on disk; pin the legacy
+    # ordering (outcome -> tool -> checklist -> grounding -> chaos) so
+    # downstream results.json consumers do not see a reshuffle.
+    _patch_judges(mocker)
+    mocker.patch.object(pipeline, "LLMTestCase")
+    mocker.patch.object(
+        pipeline, "GEval", side_effect=lambda **kw: SimpleNamespace(name=kw["name"])
+    )
+    mocker.patch("deepeval.evaluate", side_effect=_evaluate_by_metric_name())
+
+    from devops_bench.metrics import chaos_metrics, grounding
+
+    mocker.patch.object(
+        grounding,
+        "evaluate_documentation_grounding",
+        side_effect=lambda docs, tc, judge, scores: scores.update(
+            {
+                "Doc Constraint: x": {"score": 1.0, "success": True, "reason": "r"},
+                "GroundingAccuracy": {"score": 5.0, "success": True, "reason": "r"},
+                "ParameterRecallAccuracy": 1.0,
+            }
+        ),
+    )
+    mocker.patch.object(
+        grounding, "calculate_doc_retrieval_rate", return_value=0.5
+    )
+    mocker.patch.object(
+        chaos_metrics,
+        "evaluate_chaos_metrics",
+        side_effect=lambda tc, judge, cr, pr, scores: scores.update(
+            {
+                "DiagnosisAccuracy": {"score": 5.0, "success": True, "reason": "r"},
+                "GracefulRecovery": {"score": 4.0, "success": True, "reason": "r"},
+                "Workload_Deployment_Time_Seconds": 12.0,
+                "Workload_Uptime_Percentage": 99.5,
+                "Resource_Utilization_Efficiency": 0.8,
+            }
+        ),
+    )
+
+    results = [
+        _base_result(
+            expected_output="Critical Requirements:\n- replicas=3\n",
+            documentation=[{"doc_name": "g", "url": "u", "constraints": []}],
+            chaos_spec=[{"fault": "kill"}],
+            chaos_report={"injected_fault": "kill"},
+            perf_report={"uptime_percentage": 99.5},
+        )
+    ]
+    evaluate_metrics_batch(results, MagicMock(), use_mcp=True)
+
+    keys = list(results[0]["scores"].keys())
+    # Locate the section anchors and assert outcome -> tool -> checklist ->
+    # grounding -> chaos. We pin the first-occurrence index of one canonical
+    # key from each family so the assertion is robust to the per-family
+    # internal ordering (grounding emits multiple keys, chaos likewise).
+    def idx(name: str) -> int:
+        return keys.index(name)
+
+    assert (
+        idx("OutcomeValidity")
+        < idx("ToolInvocation")
+        < idx("Check: replicas=3")
+        < idx("ChecklistScore")
+        < idx("GroundingAccuracy")
+        < idx("DiagnosisAccuracy")
+    )

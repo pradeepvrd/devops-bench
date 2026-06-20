@@ -57,6 +57,27 @@ __all__ = [
 VerificationNode = Any
 
 
+
+def _parse_compound_children(cls: type, data: Any) -> Any:
+    """Recurse into ``checks`` so each child is parsed through the registry.
+
+    Shared between :class:`SequenceSpec` and :class:`ParallelSpec` so the two
+    compound nodes carry one ``model_validator(mode="before")`` implementation
+    instead of byte-identical copies.
+
+    Args:
+        cls: The compound model class (provided by the pydantic validator).
+        data: The raw payload pydantic is about to validate.
+
+    Returns:
+        The payload unchanged when no ``checks`` key is present; otherwise a
+        shallow copy with each child already parsed through :func:`parse_node`.
+    """
+    if isinstance(data, dict) and "checks" in data:
+        data = {**data, "checks": [parse_node(c) for c in data["checks"]]}
+    return data
+
+
 @VERIFIERS.register("sequence")
 class SequenceSpec(BaseModel):
     """Ordered, fail-fast group: members run in sequence; stop at first failure.
@@ -71,13 +92,7 @@ class SequenceSpec(BaseModel):
     name: str | None = None
     checks: list[Any]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _parse_children(cls, data: Any) -> Any:
-        """Recurse into ``checks`` so each child is parsed through the registry."""
-        if isinstance(data, dict) and "checks" in data:
-            data = {**data, "checks": [parse_node(c) for c in data["checks"]]}
-        return data
+    _parse_children = model_validator(mode="before")(_parse_compound_children)
 
 
 @VERIFIERS.register("parallel")
@@ -94,13 +109,7 @@ class ParallelSpec(BaseModel):
     name: str | None = None
     checks: list[Any]
 
-    @model_validator(mode="before")
-    @classmethod
-    def _parse_children(cls, data: Any) -> Any:
-        """Recurse into ``checks`` so each child is parsed through the registry."""
-        if isinstance(data, dict) and "checks" in data:
-            data = {**data, "checks": [parse_node(c) for c in data["checks"]]}
-        return data
+    _parse_children = model_validator(mode="before")(_parse_compound_children)
 
 
 def parse_node(data: Any) -> BaseModel:
@@ -118,7 +127,16 @@ def parse_node(data: Any) -> BaseModel:
             names an unregistered type, or fails the target model's validation.
     """
     if isinstance(data, BaseModel):
-        return data
+        if type(data) in set(VERIFIERS.values()):
+            return data
+        raise _validation_error(
+            "verification_spec_unregistered_model",
+            (
+                f"verification spec node {type(data).__name__!r} is not a "
+                "registered verifier"
+            ),
+            input_value=data,
+        )
     if not isinstance(data, dict):
         # Surface as a ValidationError so callers see pydantic's familiar error
         # surface even when an entry is the wrong shape (e.g. a bare list).
