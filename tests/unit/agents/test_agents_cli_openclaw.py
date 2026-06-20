@@ -91,14 +91,23 @@ def test_parse_trajectory_export_surfaces_decode_errors():
     assert len(trajectory) == 1
 
 
-def test_parse_trajectory_export_keeps_unpaired_result_as_synthetic_entry():
+def test_parse_trajectory_export_drops_unpaired_result_and_surfaces_error():
+    """Orphan tool_result is dropped from trajectory, recorded on errors.
+
+    Mirrors the API agent's ``_fold_with_extraction_errors`` policy and the
+    Gemini ``parse_stream_json`` policy so every agent feeds the metrics seam
+    one shape — only real ToolCalls the model issued ride on
+    ``AgentResult.trajectory``; orphans are diagnostics, not trajectory entries.
+    """
     blob = _trajectory_jsonl(
         {"type": "tool_result", "id": "ghost", "output": "?"}
     )
     trajectory, _tokens, errors = parse_trajectory_export(blob)
+    # Orphan must NOT appear in the canonical trajectory.
+    assert trajectory == []
+    # ...but MUST be surfaced on errors so the run is never silent-empty.
     assert any("without matching call" in m for m in errors)
-    assert trajectory and trajectory[0]["status"] == "completed"
-    assert trajectory[0]["result"] == "?"
+    assert any("ghost" in m for m in errors)
 
 
 def test_strip_ansi_removes_color_codes():

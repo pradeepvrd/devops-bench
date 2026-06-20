@@ -161,7 +161,10 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, list[str
     (with the matching ``id`` and ``output``); message lines may carry
     ``usage`` token counts. The parser folds matching call/result pairs into
     one :class:`ToolCall` so the metrics layer sees the canonical trajectory
-    other agents emit, and surfaces parse misses on the ``errors`` list.
+    other agents emit; an unpaired ``tool_result`` (no matching ``tool_call``
+    seen yet) is **dropped** from the trajectory and reported on the
+    ``errors`` list, matching the API agent's ``_fold_with_extraction_errors``
+    and the Gemini ``parse_stream_json`` policy.
 
     Args:
         jsonl_text: Raw contents of the trajectory JSONL inside the export
@@ -211,18 +214,17 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, list[str
             text = output if isinstance(output, str) else json.dumps(output, default=str)
             target = pending.pop(str(call_id), None) if call_id else None
             if target is None:
-                # An unpaired result still carries useful diagnostics; append
-                # it as a synthetic completed entry so the metrics see it.
-                trajectory.append(
-                    ToolCall(
-                        name=entry.get("name", ""),
-                        args={},
-                        result=text,
-                        status="error" if entry.get("is_error") else "completed",
-                    )
-                )
+                # Drop the orphan from the trajectory but surface it on errors.
+                # Synthesizing a free-floating result entry would break the
+                # "every trajectory item is a real ToolCall the model issued"
+                # invariant the metrics layer relies on; the API agent's
+                # ``_fold_with_extraction_errors`` and the Gemini stream-json
+                # parser both apply the same rule, so every agent feeds the
+                # metrics seam an identical canonical shape.
+                preview = text[:80].replace("\n", " ")
                 errors.append(
-                    f"trajectory tool_result without matching call (id={call_id!r})"
+                    f"trajectory tool_result without matching call "
+                    f"(id={call_id!r}, content={preview!r})"
                 )
                 continue
             target.result = text
