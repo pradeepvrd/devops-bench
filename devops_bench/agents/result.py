@@ -79,6 +79,13 @@ class AgentResult:
     def to_dict(self) -> dict:
         """Return the JSON-serializable mapping consumed by the harness.
 
+        Container fields (``trajectory``, ``tokens``, ``errors``, ``metadata``)
+        are returned as **shallow** copies — the outer list/dict is fresh, but
+        inner ``ToolCall.to_dict()`` mappings and other nested values stay
+        aliased. Top-level mutation on the snapshot (append / pop / assign new
+        keys) does not leak back into this :class:`AgentResult`; callers that
+        mutate nested values must deep-copy first.
+
         Returns:
             A dict with the typed fields above; the boundary shim downstream
             metrics / the result reporter read.

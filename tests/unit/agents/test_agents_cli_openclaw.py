@@ -131,6 +131,21 @@ def test_build_local_command_quotes_inputs_and_includes_model_set():
     assert "--agent operator" in cmd
 
 
+def test_build_local_command_chains_models_set_with_and(monkeypatch):
+    """A failed `models set` must abort the run, never fall through to the stored default.
+
+    The fragment is chained with `&&` (not `;`) so bash short-circuits on
+    failure; the agent then sees a non-zero return code and records it on
+    AgentResult.errors instead of silently running the wrong model arm.
+    """
+    cfg = AgentConfig(model="gemini-2.5-pro", provider="gemini")
+    cmd = _build_local_command(cfg, "p", "operator", "/usr/local/bin/oc")
+    # The model-set fragment immediately precedes the agent invocation; the
+    # only join between them must be `&&`.
+    assert "models set google/gemini-2.5-pro && " in cmd
+    assert "models set google/gemini-2.5-pro; " not in cmd
+
+
 def test_build_local_command_omits_model_set_when_no_model_configured():
     cmd = _build_local_command(AgentConfig(), "prompt", "operator", "/usr/local/bin/oc")
     assert "models set" not in cmd
@@ -161,30 +176,46 @@ def _make_subprocess_result(stdout: str = "", stderr: str = "", returncode: int 
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
-def test_execute_happy_path_emits_canonical_trajectory(monkeypatch, tmp_path):
-    """oc agent succeeds, oc sessions yields one row, export-trajectory parses cleanly."""
+def _bundle_writer(
+    workspace_arg: str, output_filename: str | None, output_text: str
+):
+    """Build a fake core-subprocess.run that writes a trajectory export bundle.
 
+    Args:
+        workspace_arg: Value of ``--workspace`` in argv to locate the dir.
+        output_filename: Bundle output file to create (e.g. ``"output.md"``);
+            ``None`` skips writing one so the agent falls back to stdout.
+        output_text: Contents of the bundle output file (when written).
+    """
     sessions_payload = json.dumps([{"key": "agent:operator:test", "model": "google/gemini-2.5-pro"}])
 
-    # bash subprocess: capture the command, return success.
-    def fake_bash(cmd, **kwargs):
-        return _make_subprocess_result(stdout="OK\nsessionFile=/tmp/ignored.jsonl\n", returncode=0)
-
-    monkeypatch.setattr(subprocess, "run", fake_bash)
-
-    # core.subprocess.run: dispatch on the second arg.
     def fake_core_run(argv, **kwargs):
         if argv[1] == "sessions" and "export-trajectory" not in argv:
             return _make_subprocess_result(stdout=sessions_payload, returncode=0)
         if "export-trajectory" in argv:
-            ws = Path(argv[argv.index("--workspace") + 1])
+            ws = Path(argv[argv.index(workspace_arg) + 1])
             export_root = ws / ".openclaw" / "trajectory-exports" / "bundle"
             export_root.mkdir(parents=True, exist_ok=True)
             (export_root / "trajectory.jsonl").write_text(SAMPLE_TRAJECTORY)
+            if output_filename is not None:
+                (export_root / output_filename).write_text(output_text)
             return _make_subprocess_result(stdout="exported", returncode=0)
         raise AssertionError(f"unexpected argv {argv}")
 
-    monkeypatch.setattr(oc_mod, "run", fake_core_run)
+    return fake_core_run
+
+
+def test_execute_happy_path_emits_canonical_trajectory(monkeypatch, tmp_path):
+    """oc agent succeeds, oc sessions yields one row, export-trajectory parses cleanly.
+
+    Bundle has no output file → agent falls back to ansi-stripped stdout.
+    """
+
+    def fake_bash(cmd, **kwargs):
+        return _make_subprocess_result(stdout="OK\n", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_bash)
+    monkeypatch.setattr(oc_mod, "run", _bundle_writer("--workspace", None, ""))
 
     agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), timeout_sec=30.0))
     result = agent.run("audit pods in default")
@@ -193,6 +224,47 @@ def test_execute_happy_path_emits_canonical_trajectory(monkeypatch, tmp_path):
     assert result.trajectory[0]["name"] == "kubectl_get_pods"
     assert result.tokens == {"input_tokens": 5, "output_tokens": 10}
     assert result.output.startswith("OK")
+
+
+def test_execute_prefers_bundle_output_over_noisy_stdout(monkeypatch, tmp_path):
+    """The bundle's clean ``output.md`` must win over `oc --log-level debug` noise.
+
+    Without the fix the judge would grade the debug-log spew on stdout — the
+    benchmark's whole point of the bundle is that it's the agent's clean,
+    final answer.
+    """
+    noisy_stdout = (
+        "[DEBUG] starting oc...\n"
+        "[INFO] sessionFile=/tmp/.openclaw/...\n"
+        "[DEBUG] turn 1\n"
+    )
+
+    def fake_bash(cmd, **kwargs):
+        return _make_subprocess_result(stdout=noisy_stdout, returncode=0)
+
+    clean_answer = "All pods in `default` are Running."
+    monkeypatch.setattr(subprocess, "run", fake_bash)
+    monkeypatch.setattr(
+        oc_mod, "run", _bundle_writer("--workspace", "output.md", clean_answer)
+    )
+
+    agent = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc")))
+    result = agent.run("audit pods")
+    assert result.output == clean_answer
+    assert "[DEBUG]" not in result.output
+
+
+def test_execute_falls_back_to_stdout_when_bundle_has_no_output(monkeypatch, tmp_path):
+    """No ``output.md`` / ``output.txt`` / ``final.txt`` → use stripped stdout."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: _make_subprocess_result(stdout="bare stdout answer", returncode=0),
+    )
+    monkeypatch.setattr(oc_mod, "run", _bundle_writer("--workspace", None, ""))
+
+    result = OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
+    assert result.output == "bare stdout answer"
 
 
 def test_execute_records_when_sessions_returns_no_rows(monkeypatch, tmp_path):

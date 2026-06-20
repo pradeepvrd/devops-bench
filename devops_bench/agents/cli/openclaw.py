@@ -106,8 +106,12 @@ def _build_local_command(
     quoted_oc = shlex.quote(oc_bin)
     sessions_dir = os.path.expanduser(f"~/.openclaw/agents/{agent_name}/sessions")
     model_id = _oc_model_id(config)
+    # Chain `models set` with `&&` so a failed model-set aborts the run; the
+    # bash non-zero exit then surfaces via `completed.returncode` and lands on
+    # `AgentResult.errors` rather than silently falling through to oc's stored
+    # default (which would invalidate the benchmark arm).
     set_model = (
-        f"{quoted_oc} models set {shlex.quote(model_id)}; " if model_id else ""
+        f"{quoted_oc} models set {shlex.quote(model_id)} && " if model_id else ""
     )
     return (
         # Wipe prior sessions so exactly one fresh session exists afterward.
@@ -299,7 +303,7 @@ class OpenClawAgent(AgentHarness):
         except OSError as exc:
             return AgentResult.errored(f"oc binary unavailable: {exc}")
 
-        output = _strip_ansi(completed.stdout or "")
+        stdout_text = _strip_ansi(completed.stdout or "")
         errors: list[str] = []
         metadata: dict = {}
 
@@ -308,8 +312,14 @@ class OpenClawAgent(AgentHarness):
             errors.append(f"oc agent exited {completed.returncode}: {stderr or '<no stderr>'}")
             metadata["returncode"] = completed.returncode
 
-        trajectory, tokens, export_errors = self._extract_trajectory(oc_bin)
+        trajectory, tokens, bundle_output, export_errors = self._extract_trajectory(oc_bin)
         errors.extend(export_errors)
+
+        # Prefer the bundle's clean output (output.md / output.txt / final.txt)
+        # over the ansi-stripped bash stdout — the latter is full of `oc
+        # --log-level debug` noise the judge would otherwise grade. Fall back
+        # to stdout only when the bundle had no output file.
+        output = bundle_output if bundle_output else stdout_text
 
         return AgentResult(
             output=output,
@@ -319,8 +329,17 @@ class OpenClawAgent(AgentHarness):
             metadata=metadata,
         )
 
-    def _extract_trajectory(self, oc_bin: str) -> tuple[list[dict], dict, list[str]]:
-        """Run ``oc sessions`` + ``export-trajectory`` and parse the bundle."""
+    def _extract_trajectory(
+        self, oc_bin: str
+    ) -> tuple[list[dict], dict, str, list[str]]:
+        """Run ``oc sessions`` + ``export-trajectory`` and parse the bundle.
+
+        Returns:
+            A ``(trajectory, tokens, output_text, errors)`` tuple. ``output_text``
+            is the bundle's clean final output (``output.md`` / ``output.txt``
+            / ``final.txt``) when present, else ``""``; the caller falls back
+            to the ansi-stripped subprocess stdout when this is empty.
+        """
         errors: list[str] = []
         try:
             sessions = run(
@@ -330,22 +349,22 @@ class OpenClawAgent(AgentHarness):
             )
         except SubprocessError as exc:
             errors.append(f"oc sessions failed: {exc}")
-            return [], {}, errors
+            return [], {}, "", errors
         except OSError as exc:
             errors.append(f"oc sessions: binary unavailable: {exc}")
-            return [], {}, errors
+            return [], {}, "", errors
 
         if sessions.returncode != 0:
             stderr = (sessions.stderr or "").strip()
             errors.append(
                 f"oc sessions exited {sessions.returncode}: {stderr or '<no stderr>'}"
             )
-            return [], {}, errors
+            return [], {}, "", errors
 
         key = _pick_session_key(sessions.stdout or "")
         if key is None:
             errors.append("oc sessions returned no session key")
-            return [], {}, errors
+            return [], {}, "", errors
 
         with tempfile.TemporaryDirectory(prefix="oc-export-") as tmpdir:
             workspace = Path(tmpdir)
@@ -366,10 +385,10 @@ class OpenClawAgent(AgentHarness):
                 )
             except SubprocessError as exc:
                 errors.append(f"oc export-trajectory failed: {exc}")
-                return [], {}, errors
+                return [], {}, "", errors
             except OSError as exc:
                 errors.append(f"oc export-trajectory: binary unavailable: {exc}")
-                return [], {}, errors
+                return [], {}, "", errors
 
             if export.returncode != 0:
                 stderr = (export.stderr or "").strip()
@@ -377,16 +396,16 @@ class OpenClawAgent(AgentHarness):
                     f"oc export-trajectory exited {export.returncode}: "
                     f"{stderr or '<no stderr>'}"
                 )
-                return [], {}, errors
+                return [], {}, "", errors
 
-            trajectory_text, _output_text, read_errors = _read_export_bundle(workspace)
+            trajectory_text, output_text, read_errors = _read_export_bundle(workspace)
             errors.extend(read_errors)
             if not trajectory_text:
-                return [], {}, errors
+                return [], {}, output_text, errors
 
             trajectory, tokens, parse_errors = parse_trajectory_export(trajectory_text)
             errors.extend(parse_errors)
-            return trajectory, tokens, errors
+            return trajectory, tokens, output_text, errors
 
 
 def _pick_session_key(sessions_json: str) -> str | None:

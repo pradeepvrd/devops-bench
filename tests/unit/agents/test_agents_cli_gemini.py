@@ -222,6 +222,57 @@ def test_execute_passes_timeout_to_subprocess(monkeypatch):
     assert captured["timeout"] == 15.5
 
 
+def test_execute_wires_extra_env_into_subprocess_call(monkeypatch):
+    """Call-site wiring: GEMINI_MODEL / GOOGLE_API_KEY actually reach `run(...)`."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["extra_env"] = kwargs.get("extra_env")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    cfg = AgentConfig(target="gemini", model="gemini-2.5-pro", api_key="abc")
+    GeminiCliAgent(cfg).run("p")
+    env = captured["extra_env"]
+    assert env is not None
+    assert env["GEMINI_MODEL"] == "gemini-2.5-pro"
+    assert env["GOOGLE_API_KEY"] == "abc"
+    assert env["GEMINI_API_KEY"] == "abc"
+    # OTLP exporters must be disabled to avoid the CLI hanging on a broken
+    # telemetry endpoint when no AGENT_API_KEY/AGENT_MODEL is configured.
+    assert env["OTEL_SDK_DISABLED"] == "true"
+
+
+def test_parse_stream_json_accepts_tool_use_id_field_for_call_id():
+    """Some CLI builds key the tool_use on `tool_use_id`, not `id`."""
+    blob = _stream(
+        {
+            "type": "tool_use",
+            "tool_use_id": "alt-1",
+            "name": "list",
+            "input": {},
+        },
+        {"type": "tool_result", "tool_use_id": "alt-1", "content": "ok"},
+    )
+    _output, trajectory, _tokens, errors = parse_stream_json(blob)
+    assert errors == []
+    assert trajectory == [
+        {"name": "list", "args": {}, "result": "ok", "status": "completed"},
+    ]
+
+
+def test_parse_stream_json_accepts_args_field_when_input_absent():
+    """Older CLI builds emit `args` instead of `input` on tool_use."""
+    blob = _stream(
+        {"type": "tool_use", "id": "c1", "name": "x", "args": {"k": "v"}},
+        {"type": "tool_result", "id": "c1", "output": "ok"},
+    )
+    _output, trajectory, _tokens, errors = parse_stream_json(blob)
+    assert errors == []
+    assert trajectory[0]["args"] == {"k": "v"}
+    assert trajectory[0]["result"] == "ok"
+
+
 def test_run_does_not_invoke_subprocess_when_skipped(monkeypatch):
     """Sanity: parse_stream_json must not shell out (catches an import-time hazard)."""
     def boom(*_a, **_kw):
