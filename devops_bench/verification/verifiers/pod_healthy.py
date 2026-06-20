@@ -22,12 +22,14 @@ from typing import Any, Literal
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.k8s import get_json, wait
 from devops_bench.verification.base import BaseVerifier, VerificationResult
+from devops_bench.verification.registry import VERIFIERS
 
 __all__ = ["PodHealthyVerifier"]
 
 _log = get_logger("verification.pod_healthy")
 
 
+@VERIFIERS.register("pod_healthy")
 class PodHealthyVerifier(BaseVerifier):
     """Verify that pods matched by a selector are Ready (Running on fallback).
 

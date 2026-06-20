@@ -22,12 +22,14 @@ from typing import Any, Literal
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.k8s import get_json, poll_until
 from devops_bench.verification.base import BaseVerifier, VerificationResult
+from devops_bench.verification.registry import VERIFIERS
 
 __all__ = ["ScalingCompleteVerifier"]
 
 _log = get_logger("verification.scaling_complete")
 
 
+@VERIFIERS.register("scaling_complete")
 class ScalingCompleteVerifier(BaseVerifier):
     """Verify that a deployment has converged to a minimum ready replica count.
 
