@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the discriminated-union chaos spec."""
+"""Unit tests for the registry-driven chaos spec."""
 
 from __future__ import annotations
 
@@ -86,7 +86,8 @@ def test_bare_list_or_dict_at_node_position_is_rejected():
     with pytest.raises(ValidationError):
         ChaosSpec.model_validate([{"type": "time"}])
     with pytest.raises(ValidationError):
-        # action position taking a bare list
+        # action position taking a bare list — the registry-driven parser
+        # surfaces "chaos fault node must be a mapping" via ValidationError.
         ChaosSpec.model_validate(
             {
                 "trigger": {"type": "time"},
@@ -111,7 +112,11 @@ def test_unknown_extra_field_is_forbidden():
 
 
 def test_unknown_discriminator_value_raises_validation_error():
-    with pytest.raises(ValidationError):
+    # Phase 4: unknown ``type`` keys raise a ValidationError that lists the
+    # registered keys in the message — the registry-driven parser builds this
+    # text from ``FAULTS.keys()`` / ``TRIGGERS.keys()`` so a new fault Just
+    # Works with no central edit.
+    with pytest.raises(ValidationError) as exc_info:
         ChaosSpec.model_validate(
             {
                 "trigger": {"type": "made_up"},
@@ -121,11 +126,31 @@ def test_unknown_discriminator_value_raises_validation_error():
                 },
             }
         )
-    with pytest.raises(ValidationError):
+    assert "made_up" in str(exc_info.value)
+    assert "time" in str(exc_info.value)
+
+    with pytest.raises(ValidationError) as exc_info:
         ChaosSpec.model_validate(
             {
                 "trigger": {"type": "time"},
                 "action": {"type": "no_such_fault"},
+            }
+        )
+    assert "no_such_fault" in str(exc_info.value)
+    assert "generate_load" in str(exc_info.value)
+
+
+def test_missing_type_discriminator_is_rejected():
+    # Phase 4: a node without ``type`` is rejected at parse time, not silently
+    # accepted as a free-form dict.
+    with pytest.raises(ValidationError):
+        ChaosSpec.model_validate(
+            {
+                "trigger": {"delay_seconds": 5},  # missing type
+                "action": {
+                    "type": "generate_load",
+                    "target": {"service_url": "http://x", "qps": 1},
+                },
             }
         )
 
@@ -145,18 +170,20 @@ def test_validate_spec_returns_typed_chaos_spec():
 
 
 def test_json_schema_emits_a_top_level_object():
+    # Phase 4: ``ChaosSpec`` is registry-driven, so its JSON schema no longer
+    # enumerates concrete fault/trigger types under ``action`` / ``trigger`` —
+    # that is exactly what lets a new fault land without a schema edit. The
+    # schema still exposes the top-level shape (``name``, ``trigger``,
+    # ``action``, ``verify``) for editor tooling.
     schema = json_schema()
     assert schema.get("type") == "object"
-    # Discriminator metadata lives under the property's reference; we just
-    # assert the schema mentions the canonical fields and the union members.
-    schema_str = repr(schema)
-    assert "trigger" in schema_str
-    assert "action" in schema_str
-    assert "generate_load" in schema_str
-    assert "time" in schema_str
+    properties = schema.get("properties", {})
+    assert set(properties).issuperset({"name", "trigger", "action", "verify"})
+    assert "trigger" in schema.get("required", [])
+    assert "action" in schema.get("required", [])
 
 
-def test_registries_advertise_the_phase_a_concretes():
+def test_registries_advertise_the_bundled_concretes():
     assert "generate_load" in FAULTS
     assert FAULTS.get("generate_load") is GenerateLoadFault
     assert "time" in TRIGGERS
