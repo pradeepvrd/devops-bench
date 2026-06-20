@@ -378,8 +378,13 @@ def test_extract_tokens_preserves_legacy_on_disk_key_scheme():
 # ---------------------------------------------------------------------------
 
 
-def test_execute_runs_with_no_tools_when_target_unset(monkeypatch):
-    """With no MCP server and no skills, the loop runs tool-less."""
+def test_execute_runs_with_no_tools_when_capabilities_default(monkeypatch):
+    """Default capabilities (no MCP binding, no skills) → loop runs tool-less.
+
+    Renamed from ``..._when_target_unset`` because the MCP gate is no longer
+    ``config.target`` — it's ``config.capabilities.mcp``. The old name
+    survives in git history but the new one matches the post-PR3 reality.
+    """
     fake = _FakeLLMClient(
         [
             _Turn(
@@ -640,18 +645,35 @@ def test_execute_no_skills_no_mcp_runs_tool_less(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_execute_returns_errored_on_empty_mcp_server_string(monkeypatch):
-    """A whitespace-only MCP server command triggers ``MCPClient`` ValueError;
-    the agent converts it to an errored result rather than crashing the harness.
+def test_execute_returns_errored_on_mcpclient_value_error(monkeypatch):
+    """A ``ValueError`` from ``MCPClient.__aenter__`` (e.g. an unspawnable
+    server command) must convert to an errored :class:`AgentResult` rather
+    than bubbling through the base safety net.
+
+    After PR3's ``shlex.join`` fix, a whitespace-only binding command is no
+    longer lossy-collapsed to ``""``, so the *binding* path no longer
+    triggers MCPClient's empty-string guard naturally. We instead patch
+    ``MCPClient`` to raise the same ``ValueError`` directly, which exercises
+    the agent-side conversion path.
     """
+
+    class _BoomMCP:
+        def __init__(self, _path: str) -> None: ...
+
+        async def __aenter__(self) -> _BoomMCP:
+            raise ValueError(
+                "MCP server_path is empty; set AGENT_MCP_SERVER to the MCP "
+                "server command."
+            )
+
+        async def __aexit__(self, *_a: Any) -> None: ...
+
     fake = _FakeLLMClient([_Turn(text="never reached")])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _BoomMCP)
 
-    # An MCP binding with a whitespace-only command word survives the
-    # capability gate (binding is present, command is non-empty) but trips
-    # ``MCPClient.__aenter__``'s ``shlex.split`` empty-parts check.
     caps = AgentCapabilities(
-        mcp_servers=(McpBinding(name="bad", command=("   ",)),),
+        mcp_servers=(McpBinding(name="bad", command=("/never-spawned",)),),
     )
     result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
     assert result.has_errors()
@@ -930,3 +952,37 @@ def test_execute_skips_mcp_when_binding_has_no_command(monkeypatch):
     )
     result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
     assert result.output == "ok"
+
+
+def test_execute_preserves_spaced_command_token_through_shlex_roundtrip(monkeypatch):
+    """A spaced argv token (``("uv run", "mcp-server")``) must reach MCPClient
+    intact: ``shlex.join`` quotes it on the way in, ``MCPClient``'s
+    ``shlex.split`` recovers the original parts on the way out.
+
+    Regression for the lossy ``" ".join`` that previously silently expanded
+    one token into two when the binding carried a spaced word (e.g. a launch
+    command that wraps an interpreter invocation).
+    """
+    import shlex
+
+    captured: dict = {}
+
+    class _RecordingMCP(_FakeMCPClient):
+        def __init__(self, path: str) -> None:
+            super().__init__(tools=[])
+            captured["path"] = path
+
+    fake = _FakeLLMClient([_Turn(text="done")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _RecordingMCP)
+
+    original = ("uv run", "mcp-server", "--flag")
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="spaced", command=original),),
+    )
+    ApiAgent(AgentConfig(capabilities=caps)).run("p")
+
+    # MCPClient calls ``shlex.split`` on its ``server_path``; re-splitting the
+    # path the agent handed it must recover the original tuple element-for-
+    # element, including the spaced first token.
+    assert tuple(shlex.split(captured["path"])) == original

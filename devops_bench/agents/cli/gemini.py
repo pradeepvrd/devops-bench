@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from pathlib import Path
 
 from devops_bench.agents.base import AGENTS, AgentHarness
 from devops_bench.agents.capabilities import McpMixin, RulesMixin
@@ -40,6 +42,10 @@ from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.subprocess import run
 
 __all__ = ["GeminiCliAgent", "parse_stream_json"]
+
+# Filename the Gemini CLI auto-loads from its working directory as the
+# operator brief / startup context (its native equivalent of a system prompt).
+_GEMINI_RULES_FILE = "GEMINI.md"
 
 _log = get_logger("agents.cli.gemini")
 
@@ -215,22 +221,42 @@ class GeminiCliAgent(McpMixin, RulesMixin, AgentHarness):
         self.rules = caps.rules
 
     def _execute(self, prompt: str) -> AgentResult:
-        """Build argv, run the CLI, and parse the stream-json output."""
+        """Build argv, run the CLI, and parse the stream-json output.
+
+        When ``capabilities.rules.text`` is non-empty, the agent runs the
+        binary inside a per-run temp working directory and writes the rules
+        text to ``GEMINI.md`` there before invocation — the CLI auto-loads
+        that file as its startup context, which is the binary's native
+        delivery mechanism for an operator brief. The temp dir is cleaned up
+        when ``_execute`` returns.
+        """
         target = os.path.expanduser(self.config.target or "gemini")
         allowed_tools = self.config.capabilities.allowed_tools
         argv = _build_argv(target, prompt, allowed_tools)
-        try:
-            completed = run(
-                argv,
-                extra_env=_build_env(self.config),
-                check=False,
-                timeout=self.config.timeout_sec,
-            )
-        except SubprocessError as exc:
-            return AgentResult.errored(f"gemini subprocess error: {exc}")
-        except OSError as exc:
-            # Missing / non-executable binary; core.subprocess.run does not wrap.
-            return AgentResult.errored(f"gemini binary unavailable: {exc}")
+        env_overlay = _build_env(self.config)
+        rules_text = self.config.capabilities.rules.text
+
+        with tempfile.TemporaryDirectory(prefix="gemini-run-") as tmpdir:
+            if rules_text:
+                # The Gemini CLI auto-loads ``GEMINI.md`` from its cwd as the
+                # startup context — that is the native delivery channel for
+                # the operator brief. Writing it under a per-run temp dir
+                # keeps the user's filesystem untouched and avoids races
+                # between concurrent runs.
+                (Path(tmpdir) / _GEMINI_RULES_FILE).write_text(rules_text)
+            try:
+                completed = run(
+                    argv,
+                    extra_env=env_overlay,
+                    cwd=tmpdir,
+                    check=False,
+                    timeout=self.config.timeout_sec,
+                )
+            except SubprocessError as exc:
+                return AgentResult.errored(f"gemini subprocess error: {exc}")
+            except OSError as exc:
+                # Missing / non-executable binary; core.subprocess.run does not wrap.
+                return AgentResult.errored(f"gemini binary unavailable: {exc}")
 
         output, trajectory, tokens, parse_errors = parse_stream_json(completed.stdout or "")
         errors: list[str] = list(parse_errors)

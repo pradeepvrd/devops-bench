@@ -359,3 +359,72 @@ def test_openclaw_agent_mirrors_rules_binding_onto_mixin_attribute():
     caps = AgentCapabilities(rules=AgentRules(text="be precise"))
     agent = OpenClawAgent(AgentConfig(capabilities=caps))
     assert agent.rules == AgentRules(text="be precise")
+
+
+# ---------------------------------------------------------------------------
+# Rules delivery: the bound text actually reaches the spawned `oc` command.
+# ---------------------------------------------------------------------------
+
+
+def test_prepend_rules_passes_prompt_through_when_rules_empty():
+    from devops_bench.agents.cli.openclaw import _prepend_rules
+
+    assert _prepend_rules("", "do the thing") == "do the thing"
+    assert _prepend_rules("   \n  ", "do the thing") == "do the thing"
+
+
+def test_prepend_rules_separates_brief_from_prompt_with_blank_line():
+    from devops_bench.agents.cli.openclaw import _prepend_rules
+
+    assert _prepend_rules("be careful", "audit pods") == "be careful\n\naudit pods"
+
+
+def test_execute_prepends_bound_rules_to_oc_prompt(monkeypatch, tmp_path):
+    """The rules text must land inside the bash command string the agent
+    spawns — specifically inside the ``-m '<prompt>'`` segment that ``oc
+    agent`` reads. We capture the command and assert both the original prompt
+    and the rules text are present, with the rules ahead of the prompt."""
+    captured: dict = {}
+
+    def fake_bash(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_bash)
+    monkeypatch.setattr(
+        oc_mod, "run", lambda argv, **k: _make_subprocess_result(json.dumps([]), "", 0)
+    )
+
+    caps = AgentCapabilities(rules=AgentRules(text="you are a precise SRE"))
+    OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run(
+        "audit pods in default"
+    )
+
+    cmd = captured["cmd"]
+    assert "you are a precise SRE" in cmd, "rules text must reach the spawned oc command"
+    assert "audit pods in default" in cmd, "task prompt must still reach oc"
+    # The rules brief must precede the task prompt — order matters because the
+    # model reads it as the leading context.
+    assert cmd.index("you are a precise SRE") < cmd.index("audit pods in default")
+
+
+def test_execute_does_not_prepend_rules_when_empty(monkeypatch, tmp_path):
+    """With default (empty) rules, the prompt reaches oc unchanged — no
+    accidental blank-line prefix that would shift the model's attention."""
+    captured: dict = {}
+
+    def fake_bash(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_bash)
+    monkeypatch.setattr(
+        oc_mod, "run", lambda argv, **k: _make_subprocess_result(json.dumps([]), "", 0)
+    )
+
+    OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("just the prompt")
+    cmd = captured["cmd"]
+    # The agent shlex-quotes the prompt; "just the prompt" appears verbatim
+    # inside single quotes in the `-m` segment — and no extra blank-line
+    # prefix surrounds it.
+    assert "-m 'just the prompt'" in cmd

@@ -38,6 +38,7 @@ The :class:`ApiAgent` subclasses :class:`AgentHarness` and overrides
 from __future__ import annotations
 
 import asyncio
+import shlex
 from typing import Any
 
 from devops_bench.agents.api.mcp import MCPClient, extract_tool_text
@@ -445,7 +446,10 @@ class ApiAgent(McpMixin, SkillsMixin, RulesMixin, AgentHarness):
         # The API agent only opens an MCPClient when an MCP binding carries a
         # launch command — an empty-command binding (used by CLI agents whose
         # binary launches MCP in-process) is treated as "no MCP" here.
-        mcp_server_path = " ".join(mcp_binding.command) if mcp_binding and mcp_binding.command else None
+        # ``shlex.join`` round-trips ``MCPClient``'s ``shlex.split`` so a
+        # binding with a spaced argv token (``("uv run", "mcp-server")``) is
+        # rebuilt as a single quoted word rather than two unquoted tokens.
+        mcp_server_path = shlex.join(mcp_binding.command) if mcp_binding and mcp_binding.command else None
         skills_paths = self.config.capabilities.skills.paths
         rules_text = self.config.capabilities.rules.text
 

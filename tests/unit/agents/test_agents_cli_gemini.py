@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 
@@ -357,3 +358,74 @@ def test_gemini_agent_mirrors_capability_bindings_onto_mixin_attributes():
     agent = GeminiCliAgent(AgentConfig(capabilities=caps))
     assert agent.mcp_servers == (binding,)
     assert agent.rules == AgentRules(text="be a sre")
+
+
+# ---------------------------------------------------------------------------
+# Rules delivery: GEMINI.md actually reaches the binary's working directory.
+# ---------------------------------------------------------------------------
+
+
+def test_execute_writes_gemini_md_with_rules_text_before_subprocess(monkeypatch):
+    """When rules.text is bound, GEMINI.md exists with that text in the cwd
+    handed to the subprocess — at the *moment* `run` is called.
+
+    Snapshotting inside the fake `run` is load-bearing: the agent uses a
+    `TemporaryDirectory` context manager whose cleanup runs after `_execute`
+    returns, so a post-hoc filesystem check on the cwd would race with
+    cleanup. Reading the file from inside `run` proves the binary would see
+    it on startup, which is what the CLI's auto-load relies on.
+    """
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        from pathlib import Path
+
+        cwd = kwargs.get("cwd")
+        captured["cwd"] = cwd
+        gemini_md = Path(cwd) / "GEMINI.md" if cwd else None
+        captured["gemini_md_exists"] = bool(gemini_md and gemini_md.exists())
+        captured["gemini_md_text"] = (
+            gemini_md.read_text() if captured["gemini_md_exists"] else None
+        )
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AgentCapabilities(rules=AgentRules(text="you are a precise SRE"))
+    GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert captured["cwd"] is not None, "agent must set cwd so GEMINI.md is auto-loaded"
+    assert captured["gemini_md_exists"], "GEMINI.md must exist in cwd before subprocess"
+    assert captured["gemini_md_text"] == "you are a precise SRE"
+
+
+def test_execute_skips_writing_gemini_md_when_rules_empty(monkeypatch):
+    """Empty rules.text → no GEMINI.md created (do not write a blank file)."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        cwd = kwargs.get("cwd")
+        captured["cwd"] = cwd
+        gemini_md = os.path.join(cwd, "GEMINI.md") if cwd else None
+        captured["gemini_md_exists"] = bool(gemini_md and os.path.exists(gemini_md))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    GeminiCliAgent(AgentConfig(target="gemini")).run("p")  # default empty rules
+    assert captured["gemini_md_exists"] is False
+
+
+def test_execute_cleans_up_temp_working_dir_after_run(monkeypatch):
+    """The per-run temp working dir is cleaned up after `_execute` returns;
+    the bound GEMINI.md leaves no trail on the user's filesystem."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AgentCapabilities(rules=AgentRules(text="any rules"))
+    GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+    # cwd was a real path during the run; after _execute returns it is gone.
+    assert captured["cwd"] is not None
+    assert not os.path.exists(captured["cwd"])

@@ -54,6 +54,14 @@ class AgentCapabilities:
         Most agents drive a single MCP server today; this convenience accessor
         keeps gate checks readable (``if config.capabilities.mcp: ...``)
         without leaking a tuple-indexing detail into every consumer.
+
+        Gotcha:
+            ``ApiAgent`` honors only the first binding — multi-server fan-out
+            is **not** implemented in PR3. When the orchestrator (Wave 4)
+            binds multiple servers, only ``mcp_servers[0]`` is launched;
+            servers 2..N are silently dropped. Iterate ``mcp_servers``
+            directly if you need every binding (e.g. for a future fan-out or
+            for telemetry).
         """
         return self.mcp_servers[0] if self.mcp_servers else None
 

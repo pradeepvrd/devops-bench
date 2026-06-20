@@ -60,9 +60,10 @@ def _build_capabilities_from_env(env: Mapping[str, str] | None) -> AgentCapabili
 
     mcp_servers: tuple[McpBinding, ...] = ()
     if mcp_command or allowed_tools:
-        # Default name "default" — purely metadata for diagnostics; the agent
-        # never inspects it. The orchestrator will overwrite this with a
-        # catalog name (e.g. "gke") in the harness wave.
+        # ``name="default"`` is intentionally generic — env-driven from_env has
+        # no catalog to pull a real name from; the agent never inspects it,
+        # and the harness wave overwrites this with a catalog name (e.g.
+        # ``"gke"``) when it builds capabilities from the benchmark catalog.
         mcp_servers = (
             McpBinding(name="default", command=mcp_command, tools=allowed_tools),
         )
