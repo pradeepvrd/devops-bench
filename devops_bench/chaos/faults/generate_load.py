@@ -17,7 +17,10 @@
 This module owns every fortio-specific concern: the load-target schema, the
 SRE system prompt, the single ``run_command`` tool descriptor, the shell-free
 argv executor, and the typed :class:`GenerateLoadFault` node. The chaos agent
-itself is fortio-agnostic and pulls these in at injection time.
+itself is fortio-agnostic and is imported **lazily inside** :meth:`inject` so
+that loading this fault module for registry registration (the Phase-4 parse
+path) does not transitively pull :mod:`devops_bench.chaos.agent` or the
+:mod:`devops_bench.models` chain.
 """
 
 from __future__ import annotations
@@ -32,8 +35,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from devops_bench.chaos.agent import ChaosAgent
-from devops_bench.chaos.base import FAULTS, ChaosResult, Fault
+from devops_bench.chaos.base import ChaosResult, Fault
+from devops_bench.chaos.registry import FAULTS
 from devops_bench.core import get_logger
 from devops_bench.core.context import RunContext
 from devops_bench.core.subprocess import run
@@ -248,6 +251,11 @@ class GenerateLoadFault(Fault):
             ``success=False`` with the failure surfaced in ``error``.
         """
         del ctx  # unused today; faults targeting cluster state will consume it.
+        # Lazy import keeps the agent + models chain out of sys.modules until a
+        # fault actually injects — the Phase-4 parse path only needs the fault
+        # *class* to register (CONVENTIONS §8).
+        from devops_bench.chaos.agent import ChaosAgent
+
         start = time.monotonic()
         system_instruction = build_system_instruction(self.target.service_url)
         agent = ChaosAgent(

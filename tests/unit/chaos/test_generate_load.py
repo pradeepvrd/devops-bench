@@ -89,7 +89,10 @@ def test_inject_returns_chaos_result_on_success():
             assert "http://localhost:8080" in goal  # goal carries the rewritten URL
             return "spike complete"
 
-    with patch.object(gl, "ChaosAgent", _StubAgent):
+    # ``ChaosAgent`` is imported lazily inside ``inject`` (Phase 4 keeps the
+    # agent + models chain out of sys.modules until injection runs), so the
+    # patch must target the source module rather than the fault module.
+    with patch("devops_bench.chaos.agent.ChaosAgent", _StubAgent):
         result = fault.inject(_make_ctx())
 
     assert isinstance(result, ChaosResult)
@@ -110,7 +113,7 @@ def test_inject_converts_agent_failure_to_failed_chaos_result():
         def run(self, goal: str) -> str:
             raise RuntimeError("model offline")
 
-    with patch.object(gl, "ChaosAgent", _BoomAgent):
+    with patch("devops_bench.chaos.agent.ChaosAgent", _BoomAgent):
         result = fault.inject(_make_ctx())
 
     assert result.success is False
@@ -132,7 +135,7 @@ def test_inject_threads_chaos_active_event_through_to_agent():
         def run(self, goal: str) -> str:
             return "ok"
 
-    with patch.object(gl, "ChaosAgent", _CapturingAgent):
+    with patch("devops_bench.chaos.agent.ChaosAgent", _CapturingAgent):
         fault.inject(_make_ctx(), chaos_active_event=event)
 
     assert captured["chaos_active_event"] is event

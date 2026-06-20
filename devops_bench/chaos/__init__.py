@@ -14,27 +14,29 @@
 
 """Chaos injection: fault/trigger interfaces, registries, and the typed spec.
 
-The package's import surface stays minimal — ``Fault``, ``Trigger``,
+The package's import surface is intentionally small — ``Fault``, ``Trigger``,
 ``ChaosResult``, ``FAULTS``, ``TRIGGERS``, ``ChaosSpec``. ``ChaosAgent`` is
-intentionally **not** exported.
+**not** exported (and not imported on package import).
 
-What this package *does* load on import: the concrete fault / trigger modules
-that participate in :class:`ChaosSpec`'s discriminated union
-(:class:`~devops_bench.chaos.faults.generate_load.GenerateLoadFault`,
-:class:`~devops_bench.chaos.triggers.time_delay.TimeTrigger`), and transitively
-the agent module they construct at injection time. This is required for
-Phase-A union parsing (CONVENTIONS §4) and matches verification's pattern.
+Phase 4 (CONVENTIONS §4 "Phase-A → Phase-4 swap"): :class:`ChaosSpec` parses
+through the :data:`FAULTS` / :data:`TRIGGERS` registries — there is no static
+``Annotated[Union]``. Concrete fault / trigger modules are loaded **lazily**
+on the first parse (and within :meth:`Fault.inject` for the agent + models
+chain). Importing this package therefore stays strictly light:
 
-What it does **not** load: provider SDKs (``anthropic``, ``google.genai``,
-``openai``, ``ollama``), ``deepeval``, ``mcp``, or the fortio binary — all of
-those stay strictly function-local and only fire when a fault actually injects
-(CONVENTIONS §8). The lightweight-import guard in ``tests/unit/chaos`` enforces
-this invariant.
+- pulls: ``chaos.{__init__, base, registry, spec}`` and ``core.*``
+- does NOT pull: ``chaos.agent``, ``chaos.faults.*``, ``chaos.triggers.*``,
+  ``devops_bench.models.*``, provider SDKs (``anthropic``, ``google.genai``,
+  ``openai``, ``ollama``), ``deepeval``, ``mcp``, or the fortio binary.
+
+The lightweight-import guard in ``tests/unit/chaos/test_package_import.py``
+enforces this invariant.
 """
 
 from __future__ import annotations
 
-from devops_bench.chaos.base import FAULTS, TRIGGERS, ChaosResult, Fault, Trigger
+from devops_bench.chaos.base import ChaosResult, Fault, Trigger
+from devops_bench.chaos.registry import FAULTS, TRIGGERS
 from devops_bench.chaos.spec import ChaosSpec
 
 __all__ = [

@@ -21,7 +21,8 @@ from typing import Literal
 
 from pydantic import Field
 
-from devops_bench.chaos.base import TRIGGERS, Trigger
+from devops_bench.chaos.base import Trigger
+from devops_bench.chaos.registry import TRIGGERS
 from devops_bench.core import get_logger
 from devops_bench.core.context import RunContext
 

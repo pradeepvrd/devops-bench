@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Result model, abstract bases, and registries for chaos faults and triggers.
+"""Result model and abstract bases for chaos faults and triggers.
 
-Mirrors the verification package's typed-node idiom: :class:`Fault` and
-:class:`Trigger` are ``type``-tagged pydantic models so they can participate in
-the discriminated :class:`~devops_bench.chaos.spec.ChaosSpec` union; the
-:class:`ChaosResult` typed outcome travels alongside them. The
-:data:`FAULTS` / :data:`TRIGGERS` registries are the extension axes consumed by
-the harness (CONVENTIONS §2).
+The :data:`FAULTS` / :data:`TRIGGERS` registries themselves live in
+:mod:`devops_bench.chaos.registry` (re-exported here for backward compatibility
+with the original Phase-A surface). The Phase-4 spec parser in
+:mod:`devops_bench.chaos.spec` consults those registries directly.
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel
 
-from devops_bench.core import Registry
+from devops_bench.chaos.registry import FAULTS, TRIGGERS
 from devops_bench.core.context import RunContext
 
 __all__ = [
@@ -119,10 +117,3 @@ class Trigger(BaseModel, ABC):
             ctx: Run context describing the target cluster and workspace.
         """
         raise NotImplementedError
-
-
-#: Registry of concrete :class:`Fault` subclasses, keyed by their ``type``.
-FAULTS: Registry[type[Fault]] = Registry("faults")
-
-#: Registry of concrete :class:`Trigger` subclasses, keyed by their ``type``.
-TRIGGERS: Registry[type[Trigger]] = Registry("triggers")
