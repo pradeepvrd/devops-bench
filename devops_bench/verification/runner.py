@@ -44,6 +44,11 @@ __all__ = ["VerifierAgent"]
 
 _MAX_PARALLEL_WORKERS = 8
 
+# A leaf invoked with less than this many seconds left on the deadline is
+# short-circuited as timed out. Avoids issuing useless ``kubectl wait
+# --timeout=0.001s`` calls at the tail of the budget.
+_MIN_LEAF_BUDGET_SECONDS = 1.0
+
 
 def _node_name(node: Any) -> str | None:
     """Echo the optional ``name`` label from a spec node, if any."""
@@ -117,9 +122,14 @@ class VerifierAgent:
         return self._run_leaf(node, deadline)
 
     def _run_leaf(self, node: Any, deadline: float) -> VerificationResult:
-        """Run a leaf verifier with whatever budget remains on the deadline."""
+        """Run a leaf verifier with whatever budget remains on the deadline.
+
+        Short-circuits when the remaining budget is below
+        :data:`_MIN_LEAF_BUDGET_SECONDS` so we never issue a useless
+        sub-second ``kubectl wait`` at the tail of the deadline.
+        """
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining < _MIN_LEAF_BUDGET_SECONDS:
             return _timed_out(node, "deadline exhausted before evaluation")
         return node.verify(remaining)
 
@@ -159,6 +169,8 @@ class VerifierAgent:
         A parallel child still blocked in ``kubectl wait`` / ``poll_until`` when
         the deadline hits is bounded by the ``remaining`` value handed to its
         ``verify`` call, so worker threads do not linger long past the deadline.
+        A leaf that unexpectedly raises is converted to a failed child result so
+        one bad leaf does not abort the rest of the group.
         """
         start = time.monotonic()
         if not node.checks:
@@ -169,31 +181,43 @@ class VerifierAgent:
                 name=node.name,
                 children=[],
             )
-        results: list[VerificationResult | None] = [None] * len(node.checks)
+        results: list[VerificationResult] = [
+            _timed_out(child, "deadline reached") for child in node.checks
+        ]
         workers = min(_MAX_PARALLEL_WORKERS, len(node.checks))
-        with ThreadPoolExecutor(max_workers=workers) as ex:
+        # ``cancel_futures=True`` (3.9+) drops queued-but-not-started futures so
+        # an exhausted deadline does not block on workers we never want to wait
+        # for. In-flight workers are still bounded by the deadline-aware
+        # ``verify(remaining)`` call, so they cannot linger long.
+        ex = ThreadPoolExecutor(max_workers=workers)
+        try:
             futs = {
                 ex.submit(self._run, child, deadline): i
                 for i, child in enumerate(node.checks)
             }
             done, _ = futures_wait(futs, timeout=max(0.0, deadline - time.monotonic()))
             for f, i in futs.items():
-                if f in done:
+                if f not in done:
+                    continue
+                try:
                     results[i] = f.result()
-                else:
-                    results[i] = _timed_out(node.checks[i], "deadline reached")
-        materialized: list[VerificationResult] = [
-            r if r is not None else _timed_out(node.checks[i], "deadline reached")
-            for i, r in enumerate(results)
-        ]
-        ok = all(r.success for r in materialized)
+                except Exception as exc:  # noqa: BLE001 - convert to a failed child
+                    results[i] = VerificationResult(
+                        success=False,
+                        elapsed_time=0.0,
+                        reason=f"unhandled error: {exc}",
+                        name=_node_name(node.checks[i]),
+                    )
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        ok = all(r.success for r in results)
         reasons = [
-            f"[{i}] {'ok' if r.success else 'fail'}" for i, r in enumerate(materialized)
+            f"[{i}] {'ok' if r.success else 'fail'}" for i, r in enumerate(results)
         ]
         return VerificationResult(
             success=ok,
             elapsed_time=time.monotonic() - start,
             reason="; ".join(reasons),
             name=node.name,
-            children=materialized,
+            children=results,
         )

@@ -373,3 +373,88 @@ def test_parallel_node_isinstance_check_is_independent_of_leaf_construction():
 
     assert result_p.success is True
     assert result_s.success is True
+
+
+def test_parallel_with_exhausted_deadline_times_out_all_children_using_real_verifiers():
+    # Top-level parallel with timeout_sec=0 — the deadline is exhausted before
+    # any child can dispatch. Uses the REAL ``PodHealthyVerifier`` /
+    # ``ScalingCompleteVerifier`` classes (no ``verify`` stub) and patches the
+    # kubectl primitives to raise: if either were ever invoked the test fails.
+    spec = VerificationSpec(
+        {
+            "type": "parallel",
+            "name": "exhausted-group",
+            "checks": [
+                {"type": "pod_healthy", "name": "pods", "selector": "app=web"},
+                {
+                    "type": "scaling_complete",
+                    "name": "scale",
+                    "deployment": "web",
+                    "min_replicas": 1,
+                },
+            ],
+        }
+    )
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("kubectl primitive should not be called past deadline")
+
+    with (
+        patch("devops_bench.verification.verifiers.pod_healthy.wait", _fail),
+        patch("devops_bench.verification.verifiers.pod_healthy.get_json", _fail),
+        patch("devops_bench.verification.verifiers.scaling_complete.get_json", _fail),
+    ):
+        result = VerifierAgent().wait_for_condition(spec, timeout_sec=0)
+
+    assert result.success is False
+    assert result.name == "exhausted-group"
+    assert len(result.children) == 2
+    # Both children must be timed-out failures; their elapsed_time is the
+    # documented 0.0 since they never ran. The reason is either
+    # "deadline exhausted before evaluation" (leaf short-circuit on the
+    # worker thread) or "deadline reached" (parallel-level pre-fill when the
+    # worker never started).
+    for child in result.children:
+        assert child.success is False
+        assert child.elapsed_time == 0.0
+        assert "deadline" in child.reason
+    # Names propagate from the leaf nodes onto the timed-out child results.
+    assert {c.name for c in result.children} == {"pods", "scale"}
+
+
+def test_parallel_leaf_unhandled_exception_becomes_failed_child_not_group_abort():
+    # A leaf that raises unexpectedly must not abort the whole parallel group;
+    # the other children should still run and report normally.
+    def bad_pod(self: PodHealthyVerifier, timeout_sec: float) -> VerificationResult:
+        raise RuntimeError("boom")
+
+    def ok_scale(
+        self: ScalingCompleteVerifier, timeout_sec: float
+    ) -> VerificationResult:
+        return _stub_result(success=True, reason="scaled")
+
+    spec = VerificationSpec(
+        {
+            "type": "parallel",
+            "checks": [
+                {"type": "pod_healthy", "selector": "app=web"},
+                {"type": "scaling_complete", "deployment": "web"},
+            ],
+        }
+    )
+    with (
+        patch.object(PodHealthyVerifier, "verify", bad_pod),
+        patch.object(ScalingCompleteVerifier, "verify", ok_scale),
+    ):
+        result = VerifierAgent().wait_for_condition(spec, timeout_sec=10)
+
+    assert result.success is False
+    assert len(result.children) == 2
+    pod_child = result.children[0]
+    scale_child = result.children[1]
+    assert pod_child.success is False
+    assert "unhandled error" in pod_child.reason
+    assert "boom" in pod_child.reason
+    # Sibling still completed normally.
+    assert scale_child.success is True
+    assert scale_child.reason == "scaled"
