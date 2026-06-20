@@ -25,6 +25,8 @@ def test_default_construction_uses_safe_defaults():
     assert cfg.target is None
     assert cfg.timeout_sec == 600.0
     assert cfg.allowed_tools == ()
+    assert cfg.skills_paths == ()
+    assert cfg.max_turns is None
     assert dict(cfg.extra_env) == {}
 
 
@@ -36,6 +38,8 @@ def test_from_env_maps_each_field():
         "AGENT_TARGET": "/usr/local/bin/gemini",
         "AGENT_TIMEOUT_SEC": "42",
         "AGENT_ALLOWED_TOOLS": "tool_a, tool_b ,tool_c",
+        "AGENT_SKILLS_PATHS": "/a/skills, /b/skills",
+        "AGENT_MAX_TURNS": "25",
     }
     cfg = AgentConfig.from_env(env)
     assert cfg.model == "gemini-2.5-pro"
@@ -44,6 +48,8 @@ def test_from_env_maps_each_field():
     assert cfg.target == "/usr/local/bin/gemini"
     assert cfg.timeout_sec == 42.0
     assert cfg.allowed_tools == ("tool_a", "tool_b", "tool_c")
+    assert cfg.skills_paths == ("/a/skills", "/b/skills")
+    assert cfg.max_turns == 25
 
 
 def test_from_env_treats_unset_as_defaults():
@@ -52,6 +58,8 @@ def test_from_env_treats_unset_as_defaults():
     assert cfg.provider is None
     assert cfg.timeout_sec == 600.0
     assert cfg.allowed_tools == ()
+    assert cfg.skills_paths == ()
+    assert cfg.max_turns is None
 
 
 def test_from_env_blank_allowed_tools_yields_empty_tuple():

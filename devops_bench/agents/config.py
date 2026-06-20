@@ -56,6 +56,14 @@ class AgentConfig:
             (CSV-parsed from ``AGENT_ALLOWED_TOOLS``); PR3 migrates this into
             ``McpBinding.tools`` supplied by the orchestrator catalog and this
             field is removed.
+        skills_paths: Filesystem locations to discover local skill files
+            (``SKILL.md``) the API agent exposes as synthetic tools. PR2 interim
+            field (CSV-parsed from ``AGENT_SKILLS_PATHS``); PR3 migrates this
+            into ``SkillBinding.paths`` and the field is removed. Skills are
+            decoupled from MCP: an agent may have skills without MCP and vice
+            versa.
+        max_turns: Safety cap on the API agent's tool-use loop turns; flows from
+            ``AGENT_MAX_TURNS``. ``None`` uses the agent's built-in default.
         extra_env: Provider-agnostic env overlay forwarded to subprocess calls.
             Concrete agents may add their own provider-specific keys on top.
     """
@@ -66,6 +74,8 @@ class AgentConfig:
     target: str | None = None
     timeout_sec: float | None = 600.0
     allowed_tools: tuple[str, ...] = ()
+    skills_paths: tuple[str, ...] = ()
+    max_turns: int | None = None
     extra_env: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -73,9 +83,9 @@ class AgentConfig:
         """Build a config from the ``AGENT_*`` environment variables.
 
         Reads ``AGENT_MODEL`` / ``AGENT_PROVIDER`` / ``AGENT_API_KEY`` /
-        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_ALLOWED_TOOLS``. A
-        missing variable yields the dataclass default — this method never
-        raises on unset variables.
+        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_ALLOWED_TOOLS`` /
+        ``AGENT_SKILLS_PATHS`` / ``AGENT_MAX_TURNS``. A missing variable yields
+        the dataclass default — this method never raises on unset variables.
 
         Args:
             env: Optional mapping to read from (defaults to ``os.environ``).
@@ -85,6 +95,7 @@ class AgentConfig:
             A populated :class:`AgentConfig`.
         """
         timeout = get_int("AGENT_TIMEOUT_SEC", env=env)
+        max_turns = get_int("AGENT_MAX_TURNS", env=env)
         return cls(
             model=get_env("AGENT_MODEL", env=env),
             provider=get_env("AGENT_PROVIDER", env=env),
@@ -92,4 +103,6 @@ class AgentConfig:
             target=get_env("AGENT_TARGET", env=env),
             timeout_sec=float(timeout) if timeout is not None else 600.0,
             allowed_tools=_parse_csv(get_env("AGENT_ALLOWED_TOOLS", env=env)),
+            skills_paths=_parse_csv(get_env("AGENT_SKILLS_PATHS", env=env)),
+            max_turns=max_turns,
         )
