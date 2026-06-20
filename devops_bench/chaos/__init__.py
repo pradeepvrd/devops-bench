@@ -14,12 +14,22 @@
 
 """Chaos injection: fault/trigger interfaces, registries, and the typed spec.
 
-Importing this package is intentionally light: no provider SDKs, no
-``ChaosAgent``, no concrete fault or trigger. Concretes register lazily — they
-are imported at call time by the consumer (today, by importing
-:mod:`devops_bench.chaos.spec`, which is the explicit entry point for parsing).
-Mirrors :mod:`devops_bench.verification` and :mod:`devops_bench.models`'s lazy
-loading discipline (CONVENTIONS §8).
+The package's import surface stays minimal — ``Fault``, ``Trigger``,
+``ChaosResult``, ``FAULTS``, ``TRIGGERS``, ``ChaosSpec``. ``ChaosAgent`` is
+intentionally **not** exported.
+
+What this package *does* load on import: the concrete fault / trigger modules
+that participate in :class:`ChaosSpec`'s discriminated union
+(:class:`~devops_bench.chaos.faults.generate_load.GenerateLoadFault`,
+:class:`~devops_bench.chaos.triggers.time_delay.TimeTrigger`), and transitively
+the agent module they construct at injection time. This is required for
+Phase-A union parsing (CONVENTIONS §4) and matches verification's pattern.
+
+What it does **not** load: provider SDKs (``anthropic``, ``google.genai``,
+``openai``, ``ollama``), ``deepeval``, ``mcp``, or the fortio binary — all of
+those stay strictly function-local and only fire when a fault actually injects
+(CONVENTIONS §8). The lightweight-import guard in ``tests/unit/chaos`` enforces
+this invariant.
 """
 
 from __future__ import annotations

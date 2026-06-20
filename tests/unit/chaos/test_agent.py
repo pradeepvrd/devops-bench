@@ -204,3 +204,35 @@ def test_agent_retains_final_text_when_turn_cap_hits_with_tool_call():
     # Final text comes from the third (capped) turn.
     assert out == "step 2"
     assert len(seen) == 3
+
+
+def test_agent_returns_error_string_when_command_key_is_missing():
+    # Model emits the right tool but forgets the ``command`` key entirely.
+    # The dispatcher must not crash — it forwards an empty command to the
+    # handler, which surfaces it as an "Error: ..." string the model can read.
+    client = _ScriptedClient(
+        [
+            ("calling tool wrong", [{"name": "run_command", "args": {}, "id": "c1"}]),
+            ("fixed up", []),
+        ]
+    )
+    handler, seen = _handler_returning("never invoked")
+    agent = ChaosAgent(
+        system_instruction="x",
+        tool=_TOOL,
+        tool_handler=handler,
+        client=client,
+    )
+
+    out = agent.run("goal")
+
+    assert out == "fixed up"
+    # Handler IS invoked (with an empty command) — the actual fault handler
+    # decides whether to error; this asserts the dispatcher never crashes.
+    assert seen == [("", None)]
+    tool_msg = client.contents_log[-1][-1]
+    assert tool_msg["role"] == "tool"
+    # The handler returned its scripted text since this test stubs it; the
+    # production handler (run_chaos_command) returns "Error: command string is
+    # empty" — covered in test_generate_load.test_run_chaos_command_rejects_empty_command.
+    assert tool_msg["content"] == "never invoked"
