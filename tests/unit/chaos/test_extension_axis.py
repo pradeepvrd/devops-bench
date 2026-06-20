@@ -32,6 +32,7 @@ import pytest
 from devops_bench.chaos import ChaosSpec
 from devops_bench.chaos.base import ChaosResult, Fault, Trigger
 from devops_bench.chaos.registry import FAULTS, TRIGGERS
+from devops_bench.chaos.spec import _ensure_concretes_loaded
 from devops_bench.core.context import RunContext
 
 
@@ -42,7 +43,16 @@ def _isolated_registries():
     The chaos registries are module-scoped and mutable; we snapshot them on
     entry and restore on exit so dummies registered here cannot leak into other
     tests in the same interpreter.
+
+    **Pre-load the bundled concretes first.** Phase 4 made
+    :func:`devops_bench.chaos.spec._ensure_concretes_loaded` lazy — the bundled
+    ``generate_load`` / ``time`` concretes register only on the first parse.
+    If we snapshot before that happens (running this file in isolation does
+    exactly that), teardown will delete the lazily-added bundled keys along
+    with the dummy and the next test sees ``registered: []``. Forcing the
+    concrete load first ensures the snapshot contains the real baseline.
     """
+    _ensure_concretes_loaded()
     saved_faults = dict(FAULTS.items())
     saved_triggers = dict(TRIGGERS.items())
     try:
@@ -164,4 +174,3 @@ def test_unknown_type_error_message_lists_registered_keys(_isolated_registries):
     msg = str(exc_info.value)
     assert "definitely_unknown" in msg
     assert "generate_load" in msg
-
