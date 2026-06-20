@@ -276,8 +276,9 @@ async def test_caller_formats_tools_passed_through_unchanged():
 
 @pytest.mark.asyncio
 async def test_contents_record_user_assistant_and_tool_entries():
+    calls_in = [{"name": "t", "args": {"x": 1}, "id": "abc"}]
     turns = [
-        _Turn(text="thinking", calls=[{"name": "t", "args": {"x": 1}, "id": "abc"}]),
+        _Turn(text="thinking", calls=calls_in),
         _Turn(text="all done", calls=[]),
     ]
     client = FakeLLMClient(turns)
@@ -307,6 +308,16 @@ async def test_contents_record_user_assistant_and_tool_entries():
         },
         {"role": "assistant", "content": "all done"},
     ]
+    # The list returned by ``extract_function_calls`` is forwarded into the
+    # assistant message verbatim; the loop must not copy or rewrap the dicts.
+    # ``FakeLLMClient.extract_function_calls`` returns ``list(response.calls)`` —
+    # a fresh list whose elements are the original dicts. The loop must preserve
+    # the per-element identity (it is allowed to wrap them in its own list).
+    forwarded = result.contents[1]["tool_calls"]
+    assert forwarded == calls_in
+    assert forwarded[0] is calls_in[0], (
+        "loop must forward function-call dicts by identity, not by copy"
+    )
 
 
 @pytest.mark.asyncio
@@ -333,19 +344,37 @@ async def test_loop_with_zero_max_turns_yields_empty_result(caplog):
 
 
 def test_loop_import_pulls_no_provider_sdk():
-    """Importing the loop primitive must not drag in provider SDKs."""
+    """Importing the loop primitive must not drag in provider SDKs.
+
+    Runs in a fresh interpreter subprocess so prior imports in the pytest
+    process (the adapter SDKs are imported by ``test_models_*`` siblings) do
+    not mask a real import-graph leak.
+    """
+    import subprocess
     import sys
+    import textwrap
 
-    sdk_prefixes = ("google.genai", "anthropic", "openai", "ollama")
-    for mod_name in list(sys.modules):
-        if any(mod_name == p or mod_name.startswith(p + ".") for p in sdk_prefixes):
-            del sys.modules[mod_name]
+    script = textwrap.dedent(
+        """
+        import sys
+        import devops_bench.models.loop  # noqa: F401
 
-    sys.modules.pop("devops_bench.models.loop", None)
-    import devops_bench.models.loop  # noqa: F401
-
-    for mod_name in sys.modules:
-        for p in sdk_prefixes:
-            assert mod_name != p and not mod_name.startswith(p + "."), (
-                f"provider SDK leaked into devops_bench.models.loop: {mod_name}"
-            )
+        forbidden = ("google.genai", "anthropic", "openai", "ollama")
+        leaked = sorted(
+            m for m in sys.modules
+            if any(m == p or m.startswith(p + ".") for p in forbidden)
+        )
+        if leaked:
+            sys.stderr.write("LEAKED:" + ",".join(leaked))
+            sys.exit(1)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"provider SDK leaked into devops_bench.models.loop: {result.stderr}"
+    )

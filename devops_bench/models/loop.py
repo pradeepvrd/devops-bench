@@ -126,11 +126,13 @@ async def run_tool_loop(
     for turn in range(max_turns):
         _log.debug("--- Turn %d ---", turn + 1)
 
-        start = time.time()
+        start = time.monotonic()
         response = await client.generate_content(contents, tools, system_instruction)
-        total_latency += time.time() - start
+        total_latency += time.monotonic() - start
 
-        text = client.get_text_content(response)
+        # §5 says ``content`` must be a ``str``; guard against a future
+        # ``get_text_content`` returning ``None``.
+        text = client.get_text_content(response) or ""
         function_calls = client.extract_function_calls(response)
 
         # Retain the latest text on every turn so a tool call on the final turn
