@@ -47,6 +47,8 @@ from devops_bench.agents.api.skills import (
     read_skill_file,
 )
 from devops_bench.agents.base import AGENTS, AgentHarness
+from devops_bench.agents.capabilities import McpMixin, RulesMixin, SkillsMixin
+from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import get_logger
 from devops_bench.models import LLMClient, get_model
@@ -327,6 +329,7 @@ async def _run_async(
     prompt: str,
     mcp_server_path: str | None,
     skills_paths: tuple[str, ...],
+    rules_text: str | None,
     max_turns: int,
 ) -> tuple[LoopResult, list[str], list[str]]:
     """Drive the tool-use loop and return its ``(LoopResult, errors, skills)``.
@@ -342,6 +345,9 @@ async def _run_async(
         mcp_server_path: Command launching the MCP server, or ``None`` to skip
             MCP entirely.
         skills_paths: Filesystem locations to discover local skills under.
+        rules_text: Operator-brief text (the ``AgentRules.text`` payload)
+            handed to the provider as the ``system_instruction``; ``None`` /
+            empty means "no preamble".
         max_turns: Safety cap on turns.
 
     Returns:
@@ -352,6 +358,7 @@ async def _run_async(
     skill_tools, skill_resources, skill_names = await asyncio.to_thread(
         discover_skill_tools, skills_paths
     )
+    system_instruction = rules_text or None
 
     if not mcp_server_path:
         formatted = client.format_tools(skill_tools)
@@ -360,7 +367,7 @@ async def _run_async(
             client=client,
             goal=prompt,
             tools=formatted,
-            system_instruction=None,
+            system_instruction=system_instruction,
             dispatch=dispatch,
             max_turns=max_turns,
         )
@@ -374,7 +381,7 @@ async def _run_async(
             client=client,
             goal=prompt,
             tools=formatted,
-            system_instruction=None,
+            system_instruction=system_instruction,
             dispatch=dispatch,
             max_turns=max_turns,
         )
@@ -382,17 +389,27 @@ async def _run_async(
 
 
 @AGENTS.register("api")
-class ApiAgent(AgentHarness):
+class ApiAgent(McpMixin, SkillsMixin, RulesMixin, AgentHarness):
     """API agent harness driving a model-agnostic MCP tool-use loop.
 
-    Provider, model, and MCP server command all flow from
+    Provider, model, and capability bindings all flow from
     :class:`~devops_bench.agents.config.AgentConfig` — no environment reads
     happen inside this class. Capability gates:
 
-    * **MCP on/off** is driven by ``config.target`` (the MCP server command).
-      No ``BENCH_USE_MCP`` env read.
-    * **Skills on/off** is driven by ``config.skills_paths`` independently of
-      MCP — an agent may run with skills only, MCP only, both, or neither.
+    * **MCP on/off** is driven by ``config.capabilities.mcp`` (presence of an
+      :class:`~devops_bench.agents.capabilities.McpBinding` with a non-empty
+      ``command``). No ``BENCH_USE_MCP`` env read.
+    * **Skills on/off** is driven by ``config.capabilities.skills.paths``
+      independently of MCP — an agent may run with skills only, MCP only,
+      both, or neither.
+    * **Rules** flow from ``config.capabilities.rules.text`` and ride on the
+      provider's ``system_instruction`` parameter (empty text → no preamble).
+
+    Inherits :class:`McpMixin`, :class:`SkillsMixin`, :class:`RulesMixin` so
+    ``isinstance(agent, SupportsMcp/SupportsSkills/SupportsRules)`` returns
+    ``True`` for orchestrator-side capability negotiation. The mixins seed
+    ``self.mcp_servers``/``skills``/``rules`` from the config on construction
+    so the structural-Protocol attributes always reflect the bound values.
 
     The execute path opens the MCP session (when configured), discovers
     skills, hands the *pre-formatted* tool list to :func:`run_tool_loop`, and
@@ -400,6 +417,16 @@ class ApiAgent(AgentHarness):
     :class:`~devops_bench.agents.result.ToolCall` trajectory entries via
     :func:`fold_trajectory`.
     """
+
+    def __init__(self, config: AgentConfig | None = None) -> None:
+        # Initialize ``AgentHarness`` (sets ``self.config``) then mirror the
+        # capability bindings onto the mixin attributes so the structural
+        # Protocols see the granted bindings rather than the default empties.
+        AgentHarness.__init__(self, config)
+        caps = self.config.capabilities
+        self.mcp_servers = caps.mcp_servers
+        self.skills = caps.skills
+        self.rules = caps.rules
 
     def _execute(self, prompt: str) -> AgentResult:
         """Build the LLM client, drive the loop, and assemble an AgentResult.
@@ -414,14 +441,22 @@ class ApiAgent(AgentHarness):
         """
         llm_client = get_model(self.config.provider, self.config.model)
         max_turns = self.config.max_turns or _DEFAULT_MAX_TURNS
+        mcp_binding = self.config.capabilities.mcp
+        # The API agent only opens an MCPClient when an MCP binding carries a
+        # launch command — an empty-command binding (used by CLI agents whose
+        # binary launches MCP in-process) is treated as "no MCP" here.
+        mcp_server_path = " ".join(mcp_binding.command) if mcp_binding and mcp_binding.command else None
+        skills_paths = self.config.capabilities.skills.paths
+        rules_text = self.config.capabilities.rules.text
 
         try:
             loop_result, dispatch_errors, skill_names = asyncio.run(
                 _run_async(
                     llm_client,
                     prompt,
-                    self.config.target,
-                    self.config.skills_paths,
+                    mcp_server_path,
+                    skills_paths,
+                    rules_text,
                     max_turns,
                 )
             )

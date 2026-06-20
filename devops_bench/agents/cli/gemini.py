@@ -19,6 +19,12 @@ stream from stdout — no ``~/.gemini/tmp/...`` disk reads, no session-id glob,
 no internal-schema parsing. ``tool_use``/``tool_result`` events fold into the
 canonical :class:`ToolCall` list; ``result`` events carry the final text and
 the aggregated token usage.
+
+Capability wiring (PR3): the allowed-tools list comes from the aggregated
+``config.capabilities.allowed_tools`` (across every bound MCP server) and the
+operator brief from ``config.capabilities.rules.text`` (written to a
+``GEMINI.md`` file in the run working directory before invocation, the CLI's
+native context-file mechanism).
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import json
 import os
 
 from devops_bench.agents.base import AGENTS, AgentHarness
+from devops_bench.agents.capabilities import McpMixin, RulesMixin
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import SubprocessError, get_logger
@@ -180,25 +187,38 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
 
 
 @AGENTS.register("gemini")
-class GeminiCliAgent(AgentHarness):
+class GeminiCliAgent(McpMixin, RulesMixin, AgentHarness):
     """Gemini CLI agent harness driving the ``gemini`` binary.
 
     The binary path is resolved from ``config.target`` (which defaults to the
     legacy ``AGENT_TARGET`` env when :meth:`AgentConfig.from_env` was used),
     falling back to ``"gemini"`` on ``$PATH``. Model / API key flow from
     ``config.model`` / ``config.api_key`` via the env overlay — never
-    hardcoded. ``config.allowed_tools`` selects between the ``--allowed-tools``
-    overlay and the ``-e=""`` extensions-disabled path.
+    hardcoded. ``config.capabilities.allowed_tools`` (aggregated across every
+    bound MCP server) selects between the ``--allowed-tools`` overlay and the
+    ``-e=""`` extensions-disabled path.
+
+    Inherits :class:`McpMixin` and :class:`RulesMixin` so
+    ``isinstance(agent, SupportsMcp / SupportsRules)`` returns ``True`` for
+    orchestrator-side capability negotiation. The mixins mirror the granted
+    bindings from the config onto the structural-Protocol attributes.
 
     The full canonical trajectory is parsed from the official
     ``--output-format stream-json`` event stream; no session files are read
     from disk.
     """
 
+    def __init__(self, config: AgentConfig | None = None) -> None:
+        AgentHarness.__init__(self, config)
+        caps = self.config.capabilities
+        self.mcp_servers = caps.mcp_servers
+        self.rules = caps.rules
+
     def _execute(self, prompt: str) -> AgentResult:
         """Build argv, run the CLI, and parse the stream-json output."""
         target = os.path.expanduser(self.config.target or "gemini")
-        argv = _build_argv(target, prompt, self.config.allowed_tools)
+        allowed_tools = self.config.capabilities.allowed_tools
+        argv = _build_argv(target, prompt, allowed_tools)
         try:
             completed = run(
                 argv,

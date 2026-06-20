@@ -46,6 +46,7 @@ import tempfile
 from pathlib import Path
 
 from devops_bench.agents.base import AGENTS, AgentHarness
+from devops_bench.agents.capabilities import RulesMixin
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import SubprocessError, get_logger
@@ -253,7 +254,7 @@ def _read_export_bundle(workspace: Path) -> tuple[str, str, list[str]]:
 
 
 @AGENTS.register("openclaw")
-class OpenClawAgent(AgentHarness):
+class OpenClawAgent(RulesMixin, AgentHarness):
     """OpenClaw CLI agent harness driving the local ``oc`` binary.
 
     The binary path is resolved from ``config.target`` (which defaults to the
@@ -265,6 +266,12 @@ class OpenClawAgent(AgentHarness):
     ``oc sessions export-trajectory`` command into a per-run temp workspace
     and parsed into the canonical :class:`ToolCall` list.
 
+    Inherits :class:`RulesMixin` so the orchestrator can grant operator-brief
+    text uniformly. The installed ``oc`` build today exposes no in-agent MCP
+    or skills wiring, so :class:`McpMixin` / :class:`SkillsMixin` are *not*
+    declared — capability negotiation would otherwise grant a binding the
+    agent silently ignores.
+
     Args:
         config: Typed :class:`AgentConfig`; defaults are used when omitted.
         agent_name: ``oc`` agent profile (defaults to ``"operator"``).
@@ -273,8 +280,9 @@ class OpenClawAgent(AgentHarness):
     def __init__(
         self, config: AgentConfig | None = None, *, agent_name: str = "operator"
     ) -> None:
-        super().__init__(config)
+        AgentHarness.__init__(self, config)
         self.agent_name = agent_name
+        self.rules = self.config.capabilities.rules
 
     def _resolve_oc_bin(self) -> str:
         """Pick the ``oc`` binary path from config or fall back."""

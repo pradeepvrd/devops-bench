@@ -16,9 +16,16 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from devops_bench.agents.capabilities import (
+    AgentCapabilities,
+    AgentRules,
+    McpBinding,
+    SkillBinding,
+)
 from devops_bench.core import get_env, get_int
 
 __all__ = ["AgentConfig"]
@@ -31,6 +38,44 @@ def _parse_csv(raw: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
+def _build_capabilities_from_env(env: Mapping[str, str] | None) -> AgentCapabilities:
+    """Build an :class:`AgentCapabilities` aggregate from ``AGENT_*`` env vars.
+
+    Reads ``AGENT_MCP_SERVER`` (shell-quoted argv) and ``AGENT_ALLOWED_TOOLS``
+    (CSV) into a single :class:`McpBinding` when either is set;
+    ``AGENT_SKILLS_PATHS`` (CSV) into a :class:`SkillBinding`; and
+    ``AGENT_RULES_TEXT`` into :class:`AgentRules`. A missing variable yields
+    the default (empty) shape, so the function never raises on unset values
+    and a fully unset env produces a default :class:`AgentCapabilities`.
+
+    Args:
+        env: Optional mapping read from (defaults to ``os.environ``).
+
+    Returns:
+        A populated :class:`AgentCapabilities`.
+    """
+    mcp_command_raw = get_env("AGENT_MCP_SERVER", env=env) or ""
+    mcp_command = tuple(shlex.split(mcp_command_raw)) if mcp_command_raw else ()
+    allowed_tools = _parse_csv(get_env("AGENT_ALLOWED_TOOLS", env=env))
+
+    mcp_servers: tuple[McpBinding, ...] = ()
+    if mcp_command or allowed_tools:
+        # Default name "default" — purely metadata for diagnostics; the agent
+        # never inspects it. The orchestrator will overwrite this with a
+        # catalog name (e.g. "gke") in the harness wave.
+        mcp_servers = (
+            McpBinding(name="default", command=mcp_command, tools=allowed_tools),
+        )
+
+    skills_paths = _parse_csv(get_env("AGENT_SKILLS_PATHS", env=env))
+    skills = SkillBinding(paths=skills_paths)
+
+    rules_text = get_env("AGENT_RULES_TEXT", env=env) or ""
+    rules = AgentRules(text=rules_text)
+
+    return AgentCapabilities(mcp_servers=mcp_servers, skills=skills, rules=rules)
+
+
 @dataclass
 class AgentConfig:
     """Typed configuration for an agent run.
@@ -40,30 +85,33 @@ class AgentConfig:
     place that reads ``AGENT_*`` environment variables; agents themselves stop
     self-reading the environment.
 
+    Capability bindings (MCP servers, skills, operator-brief rules) ride on
+    :attr:`capabilities` as a single :class:`AgentCapabilities` aggregate; the
+    harness constructs it from a benchmark catalog (resolving the GKE MCP
+    binding, the GKE skill paths, and arm-aware rules text) and threads it
+    here. Agents consume the bindings — MCP gate is ``capabilities.mcp``
+    present; skills gate is ``capabilities.skills.paths`` non-empty.
+
     Attributes:
         model: Optional model id; flows from ``AGENT_MODEL``.
         provider: Optional provider key (``gemini``/``anthropic``/``ollama``/...);
             flows from ``AGENT_PROVIDER``.
         api_key: Optional API key delivered to provider-specific env vars by the
             concrete agent; flows from ``AGENT_API_KEY``.
-        target: Optional path / endpoint for the underlying agent binary or
-            service; flows from ``AGENT_TARGET``. CLI agents resolve their
-            binary path from this when present.
+        target: Optional CLI binary path for CLI agents (``gemini`` / ``oc``);
+            flows from ``AGENT_TARGET``. The API agent does **not** consume
+            this — its MCP server command rides on
+            ``capabilities.mcp.command``. Kept as a top-level field because it
+            describes the *agent transport*, not a capability the orchestrator
+            grants/denies.
         timeout_sec: Wall-clock seconds before an external call is aborted; the
             base harness threads this into every subprocess invocation. ``None``
             disables the timeout (use only for tests / local debug).
-        allowed_tools: Names of tools the agent may invoke. PR1 interim field
-            (CSV-parsed from ``AGENT_ALLOWED_TOOLS``); PR3 migrates this into
-            ``McpBinding.tools`` supplied by the orchestrator catalog and this
-            field is removed.
-        skills_paths: Filesystem locations to discover local skill files
-            (``SKILL.md``) the API agent exposes as synthetic tools. PR2 interim
-            field (CSV-parsed from ``AGENT_SKILLS_PATHS``); PR3 migrates this
-            into ``SkillBinding.paths`` and the field is removed. Skills are
-            decoupled from MCP: an agent may have skills without MCP and vice
-            versa.
         max_turns: Safety cap on the API agent's tool-use loop turns; flows from
             ``AGENT_MAX_TURNS``. ``None`` uses the agent's built-in default.
+        capabilities: Aggregate of the MCP / skills / rules bindings granted
+            for the run. Constructed by the orchestrator from a benchmark
+            catalog (no GKE-specific strings live in agent code).
         extra_env: Provider-agnostic env overlay forwarded to subprocess calls.
             Concrete agents may add their own provider-specific keys on top.
     """
@@ -73,9 +121,8 @@ class AgentConfig:
     api_key: str | None = None
     target: str | None = None
     timeout_sec: float | None = 600.0
-    allowed_tools: tuple[str, ...] = ()
-    skills_paths: tuple[str, ...] = ()
     max_turns: int | None = None
+    capabilities: AgentCapabilities = field(default_factory=AgentCapabilities)
     extra_env: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -83,9 +130,11 @@ class AgentConfig:
         """Build a config from the ``AGENT_*`` environment variables.
 
         Reads ``AGENT_MODEL`` / ``AGENT_PROVIDER`` / ``AGENT_API_KEY`` /
-        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_ALLOWED_TOOLS`` /
-        ``AGENT_SKILLS_PATHS`` / ``AGENT_MAX_TURNS``. A missing variable yields
-        the dataclass default — this method never raises on unset variables.
+        ``AGENT_TARGET`` / ``AGENT_TIMEOUT_SEC`` / ``AGENT_MAX_TURNS`` and
+        delegates capability construction (``AGENT_MCP_SERVER`` /
+        ``AGENT_ALLOWED_TOOLS`` / ``AGENT_SKILLS_PATHS`` / ``AGENT_RULES_TEXT``)
+        to :func:`_build_capabilities_from_env`. A missing variable yields the
+        dataclass default — this method never raises on unset variables.
 
         Args:
             env: Optional mapping to read from (defaults to ``os.environ``).
@@ -102,7 +151,6 @@ class AgentConfig:
             api_key=get_env("AGENT_API_KEY", env=env),
             target=get_env("AGENT_TARGET", env=env),
             timeout_sec=float(timeout) if timeout is not None else 600.0,
-            allowed_tools=_parse_csv(get_env("AGENT_ALLOWED_TOOLS", env=env)),
-            skills_paths=_parse_csv(get_env("AGENT_SKILLS_PATHS", env=env)),
             max_turns=max_turns,
+            capabilities=_build_capabilities_from_env(env),
         )

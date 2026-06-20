@@ -21,6 +21,13 @@ import subprocess
 from types import SimpleNamespace
 
 from devops_bench.agents import AGENTS, AgentConfig
+from devops_bench.agents.capabilities import (
+    AgentCapabilities,
+    AgentRules,
+    McpBinding,
+    SupportsMcp,
+    SupportsRules,
+)
 from devops_bench.agents.cli import gemini as gemini_mod
 from devops_bench.agents.cli.gemini import (
     GeminiCliAgent,
@@ -291,3 +298,62 @@ def test_legacy_run_cli_agent_is_gone():
 
 def test_legacy_session_glob_is_gone():
     assert not hasattr(gemini_mod, "extract_trajectory_from_session")
+
+
+# ---------------------------------------------------------------------------
+# PR3 — capability negotiation and binding consumption
+# ---------------------------------------------------------------------------
+
+
+def test_gemini_agent_satisfies_mcp_and_rules_protocols():
+    """Gemini declares MCP + Rules (its binary launches MCP in-process and
+    auto-loads ``GEMINI.md``); skills are not declared because oc-style local
+    skills are not how Gemini loads context."""
+    agent = GeminiCliAgent(AgentConfig())
+    assert isinstance(agent, SupportsMcp)
+    assert isinstance(agent, SupportsRules)
+
+
+def test_execute_pulls_allowed_tools_from_capabilities(monkeypatch):
+    """``--allowed-tools`` argv comes from ``capabilities.allowed_tools``."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="t", command=(), tools=("alpha", "beta")),),
+    )
+    GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+    argv = captured["argv"]
+    pairs = [(argv[i], argv[i + 1]) for i in range(len(argv) - 1) if argv[i] == "--allowed-tools"]
+    assert pairs == [("--allowed-tools", "alpha"), ("--allowed-tools", "beta")]
+    assert '-e=""' not in argv  # tools present → extensions enabled
+
+
+def test_execute_disables_extensions_when_capabilities_have_no_mcp(monkeypatch):
+    """No MCP binding (no allowed tools) → ``-e=""`` argv (extensions off)."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+    assert '-e=""' in captured["argv"]
+    assert "--allowed-tools" not in captured["argv"]
+
+
+def test_gemini_agent_mirrors_capability_bindings_onto_mixin_attributes():
+    """The structural-Protocol attributes track the granted bindings."""
+    binding = McpBinding(name="x", command=(), tools=("t",))
+    caps = AgentCapabilities(
+        mcp_servers=(binding,),
+        rules=AgentRules(text="be a sre"),
+    )
+    agent = GeminiCliAgent(AgentConfig(capabilities=caps))
+    assert agent.mcp_servers == (binding,)
+    assert agent.rules == AgentRules(text="be a sre")

@@ -22,6 +22,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from devops_bench.agents import AGENTS, AgentConfig
+from devops_bench.agents.capabilities import (
+    AgentCapabilities,
+    AgentRules,
+    SupportsMcp,
+    SupportsRules,
+    SupportsSkills,
+)
 from devops_bench.agents.cli import openclaw as oc_mod
 from devops_bench.agents.cli.openclaw import (
     OpenClawAgent,
@@ -330,3 +337,25 @@ def test_legacy_ssh_runner_is_gone():
 
 def test_legacy_local_runner_is_gone():
     assert not hasattr(oc_mod, "run_openclaw_agent_local")
+
+
+# ---------------------------------------------------------------------------
+# PR3 — capability negotiation: OpenClaw declares only what oc supports
+# ---------------------------------------------------------------------------
+
+
+def test_openclaw_satisfies_only_rules_protocol():
+    """The installed ``oc`` build exposes no in-agent MCP / skills wiring; the
+    agent therefore declares **only** :class:`SupportsRules`. Granting MCP or
+    skills to it would silently no-op — capability negotiation must refuse the
+    binding rather than waste it."""
+    agent = OpenClawAgent(AgentConfig())
+    assert isinstance(agent, SupportsRules)
+    assert not isinstance(agent, SupportsMcp)
+    assert not isinstance(agent, SupportsSkills)
+
+
+def test_openclaw_agent_mirrors_rules_binding_onto_mixin_attribute():
+    caps = AgentCapabilities(rules=AgentRules(text="be precise"))
+    agent = OpenClawAgent(AgentConfig(capabilities=caps))
+    assert agent.rules == AgentRules(text="be precise")
