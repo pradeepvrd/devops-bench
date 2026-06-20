@@ -189,15 +189,29 @@ class DefaultHarness(Harness):
         # capabilities and the metrics scoring call; nothing downstream
         # re-reads the env.
         self.use_mcp: bool = get_bool("BENCH_USE_MCP", True)
-        # Snapshot the granted skill paths once, so per-record builders and
-        # the e2e harness loop never re-read ``AGENT_SKILLS_PATHS`` mid-run.
-        # The harness is the single source of truth for what was granted.
-        self._granted_skill_paths: tuple[str, ...] = (
-            AgentConfig.from_env().capabilities.skills.paths
-        )
+        # Build the gated :class:`AgentConfig` ONCE here and hold the snapshot
+        # for the lifetime of this harness. Every agent run, every record's
+        # ``capabilities_granted`` field, and every consumer of
+        # :meth:`build_agent_config` reads this same object — no second
+        # ``AgentConfig.from_env()`` call. A mid-batch ``AGENT_*`` env
+        # mutation therefore CANNOT desync what the agent ran with from what
+        # the record claims it ran with.
+        self._agent_config: AgentConfig = self._build_agent_config_snapshot()
         self.default_target_deployment = default_target_deployment
         self.default_namespace = default_namespace
         self.reporter = reporter or ResultReporter(results_root)
+
+    @property
+    def _granted_skill_paths(self) -> tuple[str, ...]:
+        """Skill paths the harness granted, derived from the config snapshot.
+
+        Single source of truth: the same tuple lives on
+        ``self._agent_config.capabilities.skills.paths`` and is read by every
+        agent the harness constructs. Keeping it as a derived property (not a
+        second copy) makes it structurally impossible for the recorded
+        ``skills`` to disagree with what the agent saw.
+        """
+        return self._agent_config.capabilities.skills.paths
 
     # -- agent resolution (model/provider-agnostic) -----------------------
 
@@ -235,26 +249,33 @@ class DefaultHarness(Harness):
     # -- agent config + capabilities (explicit; no env detour) ------------
 
     def build_agent_config(self) -> AgentConfig:
-        """Build the :class:`AgentConfig` for the next agent run.
+        """Return the harness's snapshotted :class:`AgentConfig`.
 
-        Capabilities are constructed **explicitly** from the harness-owned
-        ``use_mcp`` boolean (CONVENTIONS.md §7) and the ``AGENT_*`` env vars
-        that describe the run arm (target binary, MCP server command, allowed
-        tools, skill paths, operator brief). No deeper code re-reads
-        ``BENCH_USE_MCP``: when MCP is gated off, the harness simply omits the
-        MCP binding here, so the agent's tools-enabled gate returns ``False``
-        and the metric context's ``use_mcp`` flag agrees with what the agent
-        actually saw.
+        The config is built **once** in :meth:`__init__` via
+        :meth:`_build_agent_config_snapshot` and reused for every agent run
+        plus every record's ``capabilities_granted`` field. This makes it
+        impossible for what the agent ran with to disagree with what the
+        record claims it ran with — even if ``AGENT_*`` env is mutated
+        between :class:`DefaultHarness` construction and the per-task agent
+        call. The harness is the single source of truth for the run's
+        configuration (CONVENTIONS.md §7).
 
         Returns:
-            A populated :class:`AgentConfig` with capabilities reflecting the
-            harness's catalog × run-arm decision.
+            The :class:`AgentConfig` snapshot. The same object is handed to
+            every agent the harness constructs.
         """
-        # Start from the env-derived shape so existing AGENT_* knobs continue
-        # to flow through (model, provider, api_key, target, timeout, max
-        # turns, extra_env) without re-implementing them here. Replace
-        # capabilities with the orchestrator-owned aggregate so the agent
-        # cannot see a granted MCP binding when ``use_mcp`` is False.
+        return self._agent_config
+
+    def _build_agent_config_snapshot(self) -> AgentConfig:
+        """Build the gated :class:`AgentConfig` from the env layer.
+
+        Called exactly once, from :meth:`__init__`. Starts from
+        :meth:`AgentConfig.from_env` so existing ``AGENT_*`` knobs continue
+        to flow through (``model``, ``provider``, ``api_key``, ``target``,
+        ``timeout``, ``max_turns``, ``extra_env``), then replaces
+        capabilities with the orchestrator-owned aggregate so the agent
+        cannot see a granted MCP binding when ``use_mcp`` is False.
+        """
         base = AgentConfig.from_env()
         capabilities = self._gate_capabilities(base.capabilities, self.use_mcp)
         return AgentConfig(
