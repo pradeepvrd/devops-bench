@@ -55,6 +55,44 @@ def test_mcp_client_enter_rejects_empty_server_path():
         asyncio.run(client.__aenter__())
 
 
+def test_call_tool_degrades_gracefully_when_deepeval_missing(monkeypatch):
+    """If ``deepeval`` is not installed, ``call_tool`` still works (untraced).
+
+    The legacy implementation imported ``deepeval.tracing.observe`` at the top
+    of ``call_tool``, so a host without deepeval would crash with ImportError
+    on the first tool call. The fix mirrors
+    :func:`devops_bench.agents.base._maybe_observe`: try the import, fall
+    through to the bare ``call_tool`` on failure.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("deepeval"):
+            raise ImportError(f"simulated missing dependency: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    sentinel = SimpleNamespace(content=[SimpleNamespace(text="ok")])
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+            self.calls.append((name, arguments))
+            return sentinel
+
+    client = MCPClient("does-not-matter")
+    client.session = _FakeSession()
+
+    result = asyncio.run(client.call_tool("t", {"k": "v"}))
+    assert result is sentinel
+    assert client.session.calls == [("t", {"k": "v"})]
+
+
 def test_mcp_module_does_not_import_sdk_at_module_load():
     """Importing the module must not pull the ``mcp`` SDK — it loads on enter."""
     import subprocess

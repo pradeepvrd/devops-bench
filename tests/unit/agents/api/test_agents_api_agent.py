@@ -45,11 +45,15 @@ class _Turn:
         calls: Function calls returned by ``extract_function_calls`` (each in
             the neutral ``{"name", "args", "id"}`` shape).
         usage: Optional duck-typed usage object surfaced on the raw response.
+        usage_attr: Which attribute name to attach ``usage`` under. Defaults to
+            ``"usage_metadata"`` (Google shape); set ``"usage"`` to exercise
+            Anthropic / OpenAI / Ollama paths.
     """
 
     text: str
     calls: list[dict] = field(default_factory=list)
     usage: Any = None
+    usage_attr: str = "usage_metadata"
 
 
 class _FakeLLMClient(LLMClient):
@@ -83,7 +87,7 @@ class _FakeLLMClient(LLMClient):
         )
         response = SimpleNamespace(text=turn.text, calls=turn.calls)
         if turn.usage is not None:
-            response.usage_metadata = turn.usage
+            setattr(response, turn.usage_attr, turn.usage)
         return response
 
     def format_tools(self, mcp_tools: Any) -> Any:
@@ -223,6 +227,35 @@ def test_fold_trajectory_handles_none_args_and_none_call_id():
     ]
 
 
+def test_fold_trajectory_drops_unpaired_tool_results_silently_from_trajectory():
+    """An orphan ``role: tool`` (no matching assistant call_id) is dropped from
+    the canonical trajectory — synthesizing a free-floating entry would break
+    the "every trajectory item is a real ToolCall the model issued" invariant
+    metrics depend on. The diagnostic flows out via ``_fold_with_extraction_errors``
+    instead (asserted in ``test_execute_orphan_tool_result_lands_in_errors``).
+    """
+    contents = [
+        {"role": "user", "content": "g"},
+        # No assistant turn → no matching call_id for the ghost result.
+        {"role": "tool", "tool_call_id": "ghost", "name": "x", "content": "?"},
+    ]
+    assert fold_trajectory(contents) == []
+
+
+def test_fold_with_extraction_errors_surfaces_orphan_results():
+    from devops_bench.agents.api.agent import _fold_with_extraction_errors
+
+    contents = [
+        {"role": "user", "content": "g"},
+        {"role": "tool", "tool_call_id": "ghost", "name": "x", "content": "stray"},
+    ]
+    folded, orphans = _fold_with_extraction_errors(contents)
+    assert folded == []
+    assert len(orphans) == 1
+    assert "no matching call" in orphans[0]
+    assert "ghost" in orphans[0]
+
+
 # ---------------------------------------------------------------------------
 # extract_tokens
 # ---------------------------------------------------------------------------
@@ -255,13 +288,73 @@ def test_extract_tokens_returns_empty_dict_when_no_usage():
 
 
 def test_extract_tokens_defaults_missing_counts_to_zero():
+    """Missing counts default to 0; if the source provided no total but the
+    other two fields are non-zero, the helper computes prompt+candidates so a
+    non-empty run never shows ``total_tokens: 0`` in results.json."""
     usage = SimpleNamespace(prompt_token_count=4)  # other counts unset
     response = SimpleNamespace(usage_metadata=usage)
     assert extract_tokens(response) == {
         "prompt_tokens": 4,
         "candidates_tokens": 0,
-        "total_tokens": 0,
+        # 4 + 0 (no source total provided, but a non-zero prompt → compute it).
+        "total_tokens": 4,
     }
+
+
+def test_extract_tokens_reads_anthropic_input_output_shape():
+    """Anthropic emits ``usage.input_tokens`` / ``usage.output_tokens`` and **no**
+    aggregated total. The helper must map both onto the legacy keys and compute
+    the total so non-Google providers do not silently drop tokens.
+
+    Regression test for the blocking bug found in review: the previous
+    extract_tokens only read Google-style fields and returned zeros for any
+    Anthropic response, corrupting token metrics in results.json.
+    """
+    usage = SimpleNamespace(input_tokens=42, output_tokens=17)
+    response = SimpleNamespace(usage=usage)
+    assert extract_tokens(response) == {
+        "prompt_tokens": 42,
+        "candidates_tokens": 17,
+        "total_tokens": 59,
+    }
+
+
+def test_extract_tokens_reads_openai_ollama_shape():
+    """OpenAI / Ollama emit ``usage.prompt_tokens`` / ``completion_tokens`` /
+    ``total_tokens``. The helper must map ``completion_tokens`` → the legacy
+    ``candidates_tokens`` slot and pass ``total_tokens`` through verbatim.
+
+    Regression test for the same blocking bug — Ollama responses returned
+    all-zero tokens before the provider-shape detection landed.
+    """
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+    response = SimpleNamespace(usage=usage)
+    assert extract_tokens(response) == {
+        "prompt_tokens": 10,
+        "candidates_tokens": 20,
+        "total_tokens": 30,
+    }
+
+
+def test_extract_tokens_google_total_passes_through_when_present():
+    """When the provider supplies its own total it wins over the computed sum."""
+    usage = SimpleNamespace(
+        prompt_token_count=5, candidates_token_count=7, total_token_count=99
+    )
+    response = SimpleNamespace(usage_metadata=usage)
+    # The helper does not second-guess a provider-supplied total even when it
+    # disagrees with prompt+candidates (some providers include reasoning/cached
+    # tokens in the total).
+    assert extract_tokens(response)["total_tokens"] == 99
+
+
+def test_extract_tokens_preserves_legacy_on_disk_key_scheme():
+    """The on-disk dict shape must stay ``{prompt_tokens, candidates_tokens,
+    total_tokens}`` for D3 (results.json stability) — three keys, exactly.
+    """
+    usage = SimpleNamespace(input_tokens=1, output_tokens=2)
+    keys = set(extract_tokens(SimpleNamespace(usage=usage)).keys())
+    assert keys == {"prompt_tokens", "candidates_tokens", "total_tokens"}
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +408,51 @@ def test_execute_passes_explicit_provider_and_model_to_get_model(monkeypatch):
     cfg = AgentConfig(provider="anthropic", model="claude-3-5")
     ApiAgent(cfg).run("p")
     assert captured == {"provider": "anthropic", "model": "claude-3-5"}
+
+
+def test_execute_records_anthropic_tokens_through_to_agentresult(monkeypatch):
+    """End-to-end: an Anthropic-shaped usage object surfaces on
+    ``AgentResult.tokens`` under the legacy key scheme — regression for the
+    blocking bug where non-Google providers silently logged zero tokens."""
+    fake = _FakeLLMClient(
+        [
+            _Turn(
+                text="done",
+                usage=SimpleNamespace(input_tokens=42, output_tokens=17),
+                usage_attr="usage",
+            )
+        ]
+    )
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    result = ApiAgent(AgentConfig()).run("p")
+    assert result.tokens == {
+        "prompt_tokens": 42,
+        "candidates_tokens": 17,
+        "total_tokens": 59,
+    }
+
+
+def test_execute_records_openai_tokens_through_to_agentresult(monkeypatch):
+    """End-to-end: an OpenAI/Ollama-shaped usage object surfaces under the
+    legacy key scheme."""
+    fake = _FakeLLMClient(
+        [
+            _Turn(
+                text="done",
+                usage=SimpleNamespace(
+                    prompt_tokens=10, completion_tokens=20, total_tokens=30
+                ),
+                usage_attr="usage",
+            )
+        ]
+    )
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    result = ApiAgent(AgentConfig()).run("p")
+    assert result.tokens == {
+        "prompt_tokens": 10,
+        "candidates_tokens": 20,
+        "total_tokens": 30,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +681,9 @@ def test_agent_source_has_no_bench_use_mcp_or_environ_reads():
                     f"{src.name} references env-helper {node.id!r} at line "
                     f"{node.lineno}; config flows through AgentConfig"
                 )
-            # Attribute access: ``os.environ`` / ``os.getenv``.
+            # Attribute access: ``os.environ``, ``os.getenv``, and the
+            # ``os.environ.get(...)`` call form (which presents as an outer
+            # Attribute("get", Attribute("environ", Name("os")))).
             if isinstance(node, ast.Attribute):
                 attr_chain = []
                 cur: ast.AST | None = node
@@ -561,6 +701,30 @@ def test_agent_source_has_no_bench_use_mcp_or_environ_reads():
                     f"{src.name} calls os.getenv at line {node.lineno}; "
                     "config flows through AgentConfig"
                 )
+                assert joined != "os.environ.get", (
+                    f"{src.name} calls os.environ.get at line {node.lineno}; "
+                    "config flows through AgentConfig"
+                )
+            # Subscript access: ``os.environ["FOO"]`` / ``os.environ.get(...)``
+            # patterns. The outer ``ast.Subscript`` wraps the ``os.environ``
+            # attribute lookup; the inner Attribute is also caught above via
+            # ast.walk, but checking the Subscript explicitly makes the intent
+            # legible and bug-proofs the guard against future AST refactors.
+            if isinstance(node, ast.Subscript):
+                target = node.value
+                if isinstance(target, ast.Attribute):
+                    attr_chain = []
+                    cur = target
+                    while isinstance(cur, ast.Attribute):
+                        attr_chain.append(cur.attr)
+                        cur = cur.value
+                    if isinstance(cur, ast.Name):
+                        attr_chain.append(cur.id)
+                    joined = ".".join(reversed(attr_chain))
+                    assert joined != "os.environ", (
+                        f"{src.name} subscripts os.environ[...] at line "
+                        f"{node.lineno}; config flows through AgentConfig"
+                    )
             # String literals: catch ``getenv("BENCH_USE_MCP")`` /
             # ``os.environ["BENCH_USE_MCP"]`` patterns even when wrapped in a
             # helper we didn't enumerate. Docstrings are still ``Str``/

@@ -90,6 +90,11 @@ class MCPClient:
     async def call_tool(self, name: str, arguments: dict) -> Any:
         """Invoke an MCP tool by name.
 
+        DeepEval's ``@observe`` wrapper is applied when available so MCP calls
+        appear in traces; the import is best-effort and a missing ``deepeval``
+        degrades gracefully to an untraced call (mirrors
+        :func:`devops_bench.agents.base._maybe_observe`).
+
         Args:
             name: Tool name as advertised by the server.
             arguments: Keyword arguments for the tool.
@@ -97,7 +102,10 @@ class MCPClient:
         Returns:
             The raw tool-call result from the MCP session.
         """
-        from deepeval.tracing import observe
+        try:
+            from deepeval.tracing import observe
+        except ImportError:
+            return await self.session.call_tool(name, arguments=arguments)
 
         @observe(span_type="TOOL")
         async def _call() -> Any:

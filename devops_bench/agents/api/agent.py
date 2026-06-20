@@ -75,6 +75,16 @@ def fold_trajectory(contents: list[dict]) -> list[dict]:
     ``tool_calls`` are not represented in the trajectory — the conversation's
     final assistant text already flows out via :attr:`AgentResult.output`.
 
+    Unpaired tool results — ``{role: tool}`` entries whose ``tool_call_id``
+    matches no assistant-issued call — are intentionally **dropped** from the
+    canonical trajectory (with a debug log surfacing the orphan id). Synthesizing
+    a free-floating result entry would break the "every trajectory item is a
+    real ToolCall the model issued" invariant the metrics layer relies on;
+    surfacing it as an extraction error is reserved for the agent-level errors
+    list (see ``_fold_with_extraction_errors``). This matches the CLI agents'
+    `parse_stream_json` / `parse_trajectory_export` policy, which surface
+    unmatched results on ``errors`` rather than as synthetic trajectory entries.
+
     Args:
         contents: The conversation history produced by :func:`run_tool_loop`
             (neutral message shape per CONVENTIONS §5).
@@ -83,19 +93,60 @@ def fold_trajectory(contents: list[dict]) -> list[dict]:
         A list of ``ToolCall.to_dict()`` mappings, one per tool call the model
         issued, in the order issued.
     """
+    folded, _orphans = _fold_with_extraction_errors(contents)
+    return folded
+
+
+def _fold_with_extraction_errors(
+    contents: list[dict],
+) -> tuple[list[dict], list[str]]:
+    """Same as :func:`fold_trajectory` but also returns orphan-result diagnostics.
+
+    The agent's ``_execute`` consumes both halves: the folded trajectory rides
+    on ``AgentResult.trajectory`` and orphan ids land on ``AgentResult.errors``
+    so a parser drift between the model adapter and the loop never silently
+    drops tool output (the CLI agents' acceptance bar — "no silent-empty").
+
+    Args:
+        contents: As :func:`fold_trajectory`.
+
+    Returns:
+        A ``(trajectory, orphan_errors)`` tuple. ``orphan_errors`` lists one
+        message per unpaired ``role: tool`` entry; empty on a clean fold.
+    """
+    # Index assistant call ids first so we can detect orphans on the result pass.
+    assistant_call_ids: set[str] = set()
+    for msg in contents:
+        if msg.get("role") != "assistant":
+            continue
+        for call in msg.get("tool_calls") or []:
+            cid = call.get("id")
+            if cid is not None:
+                assistant_call_ids.add(str(cid))
+
     # Pre-build call-id → (text, is_error) map so an out-of-order or absent
     # result still leaves the call as ``status="called"``/``result=None`` rather
     # than crashing on a lookup.
     results_by_id: dict[str, tuple[str, bool]] = {}
+    orphan_errors: list[str] = []
     for msg in contents:
         if msg.get("role") != "tool":
             continue
         call_id = msg.get("tool_call_id")
-        if call_id is None:
-            continue
         text = msg.get("content")
         text_str = text if isinstance(text, str) else "" if text is None else str(text)
         is_error = isinstance(text, str) and text.startswith("Error: ")
+        if call_id is None or str(call_id) not in assistant_call_ids:
+            # Drop the orphan from the trajectory but surface it for diagnostics
+            # — matching the CLI agents' "no silent-empty" rule.
+            preview = text_str[:80].replace("\n", " ")
+            msg_text = (
+                "fold_trajectory dropped tool result with no matching call "
+                f"(id={call_id!r}, content={preview!r})"
+            )
+            _log.debug(msg_text)
+            orphan_errors.append(msg_text)
+            continue
         results_by_id[str(call_id)] = (text_str, is_error)
 
     trajectory: list[ToolCall] = []
@@ -120,15 +171,29 @@ def fold_trajectory(contents: list[dict]) -> list[dict]:
                     entry.status = "error" if is_error else "completed"
             trajectory.append(entry)
 
-    return [entry.to_dict() for entry in trajectory]
+    return [entry.to_dict() for entry in trajectory], orphan_errors
 
 
 def extract_tokens(response: Any) -> dict:
     """Pull provider token usage off the final raw response.
 
-    Accepts either ``usage_metadata`` (Google-style) or ``usage`` (Anthropic /
-    OpenAI-style). Missing fields default to ``0``. When neither attribute is
-    present, returns an empty dict so :attr:`AgentResult.tokens` stays uniform.
+    Detects which provider's usage shape is present and maps each onto the
+    legacy on-disk key scheme (``prompt_tokens`` / ``candidates_tokens`` /
+    ``total_tokens``) so ``results.json`` stays stable across providers (D3).
+
+    Supported shapes:
+
+    * **Google** — ``response.usage_metadata`` with ``prompt_token_count`` /
+      ``candidates_token_count`` / ``total_token_count``.
+    * **Anthropic** — ``response.usage`` with ``input_tokens`` /
+      ``output_tokens`` (no aggregated total; the sum is used).
+    * **OpenAI / Ollama** — ``response.usage`` with ``prompt_tokens`` /
+      ``completion_tokens`` / ``total_tokens``.
+
+    The "output" field (``candidates_tokens``) absorbs whichever provider name
+    is present (``candidates_token_count`` / ``output_tokens`` /
+    ``completion_tokens``). When ``total`` is absent it is computed from the
+    other two so metrics never see ``0`` for a non-empty run.
 
     Args:
         response: The last raw provider response from
@@ -143,11 +208,42 @@ def extract_tokens(response: Any) -> dict:
     usage = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
     if usage is None:
         return {}
+
+    # Google fields live alongside legacy ``prompt_tokens``/``total_tokens``
+    # source names (OpenAI/Ollama); try the more specific Google attr first,
+    # then the OpenAI-style attr, then the Anthropic alias.
+    prompt = _first_int_attr(
+        usage, "prompt_token_count", "prompt_tokens", "input_tokens"
+    )
+    candidates = _first_int_attr(
+        usage, "candidates_token_count", "completion_tokens", "output_tokens"
+    )
+    total = _first_int_attr(usage, "total_token_count", "total_tokens")
+    # Anthropic emits no aggregated total; compute it so non-zero usage never
+    # surfaces as ``total_tokens: 0`` in results.json.
+    if total == 0 and (prompt or candidates):
+        total = prompt + candidates
+
     return {
-        "prompt_tokens": getattr(usage, "prompt_token_count", 0),
-        "candidates_tokens": getattr(usage, "candidates_token_count", 0),
-        "total_tokens": getattr(usage, "total_token_count", 0),
+        "prompt_tokens": prompt,
+        "candidates_tokens": candidates,
+        "total_tokens": total,
     }
+
+
+def _first_int_attr(obj: Any, *names: str) -> int:
+    """Return the first ``names`` attribute on ``obj`` that holds a non-``None`` int.
+
+    Provider usage objects are typed namespaces / pydantic models with the
+    counts as plain ints; an unset field is either absent or ``None``. The
+    helper falls through both cases and returns ``0`` when no name matches so
+    the caller never has to ``None``-guard the arithmetic.
+    """
+    for name in names:
+        value = getattr(obj, name, None)
+        if value is not None:
+            return int(value)
+    return 0
 
 
 def _build_dispatch(
@@ -334,7 +430,7 @@ class ApiAgent(AgentHarness):
             # rather than letting it bubble through the base safety net.
             return AgentResult.errored(str(exc))
 
-        trajectory = fold_trajectory(loop_result.contents)
+        trajectory, orphan_errors = _fold_with_extraction_errors(loop_result.contents)
         tokens = extract_tokens(loop_result.response)
         metadata: dict[str, Any] = {
             "tools_used": sorted(loop_result.tools_used),
@@ -347,6 +443,6 @@ class ApiAgent(AgentHarness):
             trajectory=trajectory,
             tokens=tokens,
             latency=loop_result.latency,
-            errors=list(dispatch_errors),
+            errors=list(dispatch_errors) + orphan_errors,
             metadata=metadata,
         )
