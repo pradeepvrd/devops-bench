@@ -44,7 +44,8 @@ from devops_bench.agents import AGENTS, AgentHarness, AgentResult, ToolCall
 from devops_bench.chaos import ChaosResult
 from devops_bench.chaos.faults.generate_load import GenerateLoadFault
 from devops_bench.chaos.triggers.time_delay import TimeTrigger
-from devops_bench.harness.default import _CHAOS_ACTIVE_WAIT_SEC, DefaultHarness
+from devops_bench.harness import default as harness_default
+from devops_bench.harness.default import DefaultHarness
 from devops_bench.tasks import load_tasks
 from devops_bench.verification import VerificationResult, VerifierAgent
 
@@ -192,10 +193,12 @@ def test_optimize_scale_smoke_end_to_end(
     # Shrink the chaos-active wait so the smoke completes quickly when the
     # fake fault already signalled the event before the scenario thread
     # started running. (The real harness uses 45s; tests don't need to.)
-    monkeypatch.setattr(
-        "devops_bench.harness.default._CHAOS_ACTIVE_WAIT_SEC", 1
-    )
-    assert _CHAOS_ACTIVE_WAIT_SEC == 45  # documented default still 45s
+    # The module global is what ``_run_one`` reads at call time, so we
+    # patch the live attribute on the module object — and assert against
+    # the same attribute, not a frozen ``from ... import`` alias (which
+    # would be a no-op assertion).
+    monkeypatch.setattr(harness_default, "_CHAOS_ACTIVE_WAIT_SEC", 1)
+    assert harness_default._CHAOS_ACTIVE_WAIT_SEC == 1
 
     # The smoke run NEVER opens a kubectl port-forward — NoOpDeployer is the
     # deployer, and the start_scenario call routes skip_port_forward=True.

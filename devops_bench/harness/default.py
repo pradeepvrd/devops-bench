@@ -60,6 +60,7 @@ from devops_bench.agents.capabilities import (
 )
 from devops_bench.chaos import ChaosSpec
 from devops_bench.core import (
+    MissingDependencyError,
     NotRegisteredError,
     RunContext,
     get_bool,
@@ -121,15 +122,19 @@ def _ensure_builtin_agents_registered() -> None:
     The registry is the only source of truth — this function exists so the
     harness can resolve canonical keys at call time without naming any module
     path in ``AGENTS.get``. Re-imports are no-ops thanks to ``sys.modules``.
+
+    Catches **only** missing-dependency / import errors (an agent module may
+    pull an optional SDK like ``anthropic`` that is absent on the host) — a
+    real bug in an agent module (``SyntaxError``, an ``AttributeError`` at
+    module top) re-raises so it cannot hide behind a silent ``debug`` log.
     """
     for module in _BUILTIN_AGENT_MODULES:
         try:
             importlib.import_module(module)
-        except Exception as exc:  # noqa: BLE001 - one missing optional dep must not abort
-            # An agent module may pull an optional SDK (e.g. ``anthropic``) that
-            # is absent on the host. Log and continue — only the agent whose key
-            # the user actually selects needs to be importable, and ``AGENTS.get``
-            # will raise a clear ``NotRegisteredError`` if it is missing.
+        except (ImportError, MissingDependencyError) as exc:
+            # Optional SDK absent on this host. ``AGENTS.get`` will still
+            # raise a clear ``NotRegisteredError`` later if the user selects
+            # an agent whose module did not load.
             _log.debug("optional agent module %s not importable: %s", module, exc)
 
 
@@ -154,6 +159,13 @@ class DefaultHarness(Harness):
             sink, not on ``json.dump``; ``harness-refactor-handoff.md`` §8). A
             default :class:`ResultReporter` rooted at ``results_root`` is built
             when omitted.
+        default_target_deployment: Fallback deployment name used both for
+            placeholder substitution and as the chaos port-forward target when
+            ``TARGET_DEPLOYMENT_NAME`` is unset. Lets a non-Hypercompute
+            embedder override the legacy default rather than monkey-patching
+            the module constant.
+        default_namespace: Fallback namespace used for the same two purposes
+            when ``NAMESPACE`` is unset.
     """
 
     def __init__(
@@ -164,6 +176,8 @@ class DefaultHarness(Harness):
         results_root: str = "results",
         *,
         reporter: ResultReporter | None = None,
+        default_target_deployment: str = _DEFAULT_TARGET_DEPLOYMENT,
+        default_namespace: str = _DEFAULT_NAMESPACE,
     ) -> None:
         self.project_id = project_id
         self.cluster_name = cluster_name
@@ -175,6 +189,14 @@ class DefaultHarness(Harness):
         # capabilities and the metrics scoring call; nothing downstream
         # re-reads the env.
         self.use_mcp: bool = get_bool("BENCH_USE_MCP", True)
+        # Snapshot the granted skill paths once, so per-record builders and
+        # the e2e harness loop never re-read ``AGENT_SKILLS_PATHS`` mid-run.
+        # The harness is the single source of truth for what was granted.
+        self._granted_skill_paths: tuple[str, ...] = (
+            AgentConfig.from_env().capabilities.skills.paths
+        )
+        self.default_target_deployment = default_target_deployment
+        self.default_namespace = default_namespace
         self.reporter = reporter or ResultReporter(results_root)
 
     # -- agent resolution (model/provider-agnostic) -----------------------
@@ -284,7 +306,9 @@ class DefaultHarness(Harness):
         """Substitute infrastructure placeholders in a prompt or expectation.
 
         ``TARGET_DEPLOYMENT_NAME`` and ``NAMESPACE`` form the integration
-        contract supplied by the provisioning layer after cluster bring-up.
+        contract supplied by the provisioning layer after cluster bring-up;
+        their fallbacks come from the constructor's
+        :attr:`default_target_deployment` / :attr:`default_namespace`.
 
         Args:
             text: Text containing ``{{...}}`` placeholders.
@@ -295,10 +319,12 @@ class DefaultHarness(Harness):
         """
         app_location = get_env("APP_LOCATION", "") or ""
         target_deployment = (
-            get_env("TARGET_DEPLOYMENT_NAME", _DEFAULT_TARGET_DEPLOYMENT)
-            or _DEFAULT_TARGET_DEPLOYMENT
+            get_env("TARGET_DEPLOYMENT_NAME", self.default_target_deployment)
+            or self.default_target_deployment
         )
-        namespace = get_env("NAMESPACE", _DEFAULT_NAMESPACE) or _DEFAULT_NAMESPACE
+        namespace = (
+            get_env("NAMESPACE", self.default_namespace) or self.default_namespace
+        )
         return (
             text.replace("{{PROJECT_ID}}", self.project_id)
             .replace("{{GCP_PROJECT_ID}}", self.project_id)
@@ -368,53 +394,84 @@ class DefaultHarness(Harness):
 
     def _build_verification_mapping(
         self, raw: Any, cluster_name: str
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[dict[str, str]]]:
         """Build a name-keyed verification mapping the chaos seam consumes.
 
-        Each entry is a mapping with a ``name`` field plus a typed
-        verification node (either inline under a ``spec`` key, or as the
-        entry itself when authored as a bare verifier). The harness validates
-        every node through :class:`VerificationSpec` so the chaos seam hands a
-        fully-typed value to :class:`~devops_bench.verification.VerifierAgent`.
+        Canonical authoring shape is a list of wrapped entries::
+
+            verification_spec:
+              - name: "Planned Load Spike Verification"
+                spec:
+                  type: parallel
+                  checks: [...]
+
+        ``name`` is the cross-reference key the chaos ``verify:`` field
+        resolves against; ``spec`` carries the typed verification node. For
+        backward compatibility the entry mapping itself is also accepted as
+        the node when no ``spec`` key is present (the legacy unwrapped shape).
+        Every authoring failure is **surfaced** — both warn-logged and
+        accumulated into the returned ``errors`` list so the harness can
+        record it on the run result, instead of silently dropping a
+        verification (which would make a typo'd cross-reference invisible to
+        the operator).
 
         Args:
             raw: The task's ``verification_spec`` blob.
             cluster_name: Active cluster name for placeholder substitution.
 
         Returns:
-            ``{name -> parsed VerificationSpec}``. An empty mapping is returned
-            when the blob is missing or malformed; the caller's
-            :meth:`ScenarioManager._resolve_verification` then warns on each
-            unresolved reference rather than dropping verification silently.
+            A pair ``(mapping, errors)``:
+
+            * ``mapping`` — ``{name -> parsed VerificationSpec}``.
+            * ``errors`` — one ``{"name", "reason"}`` entry per authoring
+              failure (a non-mapping entry, a missing ``name``, a JSON
+              parse failure on a legacy string blob, or a ``VerificationSpec``
+              validation failure). Empty when every entry parsed.
         """
         if not raw:
-            return {}
+            return {}, []
+
+        errors: list[dict[str, str]] = []
         resolved = self._resolve_spec_placeholders(raw, cluster_name)
         if isinstance(resolved, str):
             try:
                 resolved = json.loads(resolved)
             except json.JSONDecodeError as exc:
                 _log.warning("could not parse verification_spec JSON string: %s", exc)
-                return {}
+                errors.append({"name": "<root>", "reason": f"json parse: {exc}"})
+                return {}, errors
         entries = resolved if isinstance(resolved, list) else [resolved]
 
         mapping: dict[str, Any] = {}
-        for entry in entries:
+        for index, entry in enumerate(entries):
             if not isinstance(entry, dict):
+                msg = (
+                    f"verification_spec entry [{index}] must be a mapping, "
+                    f"got {type(entry).__name__}"
+                )
+                _log.warning(msg)
+                errors.append({"name": f"<index {index}>", "reason": msg})
                 continue
             name = entry.get("name")
             if not name:
+                msg = f"verification_spec entry [{index}] missing required ``name`` key"
+                _log.warning(msg)
+                errors.append({"name": f"<index {index}>", "reason": msg})
                 continue
+            # Canonical shape: ``{name, spec: <typed-node>}``; the bare-node
+            # compat path (entry itself is the node) is retained so the entry
+            # can also be a typed leaf with its own ``type``/``name`` keys.
             node = entry.get("spec") if "spec" in entry else entry
             try:
                 mapping[name] = VerificationSpec(node)
-            except Exception as exc:  # noqa: BLE001 - log + skip; never abort the run
+            except Exception as exc:  # noqa: BLE001 - surface every failure
                 _log.warning(
                     "verification entry %r failed to validate; skipping: %s",
                     name,
                     exc,
                 )
-        return mapping
+                errors.append({"name": str(name), "reason": str(exc)})
+        return mapping, errors
 
     # -- scenario (background chaos) --------------------------------------
 
@@ -447,10 +504,12 @@ class DefaultHarness(Harness):
             return None
 
         target_deployment = (
-            get_env("TARGET_DEPLOYMENT_NAME", _DEFAULT_TARGET_DEPLOYMENT)
-            or _DEFAULT_TARGET_DEPLOYMENT
+            get_env("TARGET_DEPLOYMENT_NAME", self.default_target_deployment)
+            or self.default_target_deployment
         )
-        namespace = get_env("NAMESPACE", _DEFAULT_NAMESPACE) or _DEFAULT_NAMESPACE
+        namespace = (
+            get_env("NAMESPACE", self.default_namespace) or self.default_namespace
+        )
 
         spec = chaos_specs[0]
         scenario_manager = ScenarioManager(
@@ -524,8 +583,10 @@ class DefaultHarness(Harness):
 
         Returns:
             The detailed result dict. On any failure a ``status: "failed"``
-            record (with ``error`` and ``score: 0``) is returned instead of
-            being dropped, so failures stay visible to downstream parsers.
+            record is returned instead of being dropped, so failures stay
+            visible to downstream parsers. Success and failed records carry
+            the same top-level key set so a parser can iterate either shape
+            without a ``KeyError`` (D3 symmetric union).
         """
         infra_config = task.infrastructure or {}
         deployer = get_deployer(infra_config, self.project_id, self.cluster_name)
@@ -533,6 +594,7 @@ class DefaultHarness(Harness):
         scenario_thread: threading.Thread | None = None
         result: dict[str, Any] | None = None
         workspace_path = Path(os.getcwd())
+        verification_parse_errors: list[dict[str, str]] = []
 
         try:
             _log.info("provisioning infrastructure for: %s", task.name)
@@ -546,8 +608,10 @@ class DefaultHarness(Harness):
             prompt = self.replace_placeholders(task.prompt, active_cluster_name)
 
             chaos_specs = self._parse_chaos_specs(task.chaos_spec, active_cluster_name)
-            verification_mapping = self._build_verification_mapping(
-                task.verification_spec, active_cluster_name
+            verification_mapping, verification_parse_errors = (
+                self._build_verification_mapping(
+                    task.verification_spec, active_cluster_name
+                )
             )
 
             scenario = self.start_scenario(chaos_specs, verification_mapping, context)
@@ -577,17 +641,51 @@ class DefaultHarness(Harness):
                 agent_res=agent_res,
                 chaos_report=chaos_report,
                 perf_report=perf_report,
+                verification_parse_errors=verification_parse_errors,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
             _log.error("critical error during task %s: %s", task.name, exc)
-            result = self._failed_record(task, exc)
+            result = self._build_failed_record(
+                task, exc, verification_parse_errors=verification_parse_errors
+            )
         finally:
             if scenario_manager is not None:
                 scenario_manager.stop()
             self._teardown(deployer, infra_config, task.name)
 
         return result
+
+    #: Top-level keys present on **every** record (success and failed alike).
+    #: The harness exposes this so downstream parsers / tests can pin the
+    #: D3 symmetric schema without reproducing the literal in every spot.
+    _RECORD_KEYS: frozenset[str] = frozenset(
+        {
+            "input",
+            "output",
+            "latency",
+            "tokens",
+            "tools",
+            "trajectory",
+            "skills",
+            "name",
+            "status",
+            "error",
+            "errors",
+            "score",
+            "scores",
+            "expected_output",
+            "expected_output_raw",
+            "retrieval_context",
+            "chaos_spec",
+            "verification_spec",
+            "chaos_report",
+            "perf_report",
+            "documentation",
+            "capabilities_granted",
+            "verification_parse_errors",
+        }
+    )
 
     def _build_success_record(
         self,
@@ -598,61 +696,92 @@ class DefaultHarness(Harness):
         agent_res: AgentResult,
         chaos_report: dict[str, Any],
         perf_report: dict[str, Any],
+        verification_parse_errors: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """Shape a typed :class:`AgentResult` + reports into the legacy schema.
 
         The on-disk schema (Decision D3) is preserved by routing every typed
-        value through ``to_dict()`` / ``model_dump()``. Capability metadata
-        (``capabilities_granted``) is recorded on the result so metrics /
-        downstream consumers can read what the agent was actually granted
+        value through ``to_dict()`` / ``model_dump()`` and emitting the
+        **symmetric** key union (every key in :attr:`_RECORD_KEYS` is present
+        on every record), so success and failed records never differ in
+        top-level shape — a downstream parser iterating one shape can never
+        ``KeyError`` crossing into the other.
+
+        Capability metadata (``capabilities_granted``) is recorded so metrics
+        / downstream consumers can read what the agent was actually granted
         rather than re-reading ``BENCH_USE_MCP`` (CONVENTIONS.md §7).
         """
         dumped = agent_res.to_dict()
-        record: dict[str, Any] = {
-            "input": prompt,
-            "output": dumped.get("output", ""),
-            "latency": dumped.get("latency", 0.0),
-            "tokens": dumped.get("tokens", {}),
-            # Preserve the legacy ``tools`` key alongside the typed trajectory
-            # so downstream consumers that only sample ``tools`` keep working;
-            # the canonical trajectory is the source of truth.
-            "tools": [entry.get("name") for entry in dumped.get("trajectory", []) if entry.get("name")],
-            "trajectory": dumped.get("trajectory", []),
-            "skills": list(self.use_mcp_skill_paths()),
-            "name": task.name,
-            "status": "success",
-            "expected_output": expected_output,
-            "expected_output_raw": task.expected_output,
-            "retrieval_context": list(task.retrieval_context),
-            "chaos_spec": task.chaos_spec,
-            "verification_spec": task.verification_spec,
-            "chaos_report": chaos_report,
-            "perf_report": perf_report,
-            "documentation": [doc.model_dump() for doc in task.documentation],
-            "capabilities_granted": {
-                "use_mcp": self.use_mcp,
-                "skills": list(self.use_mcp_skill_paths()),
-            },
-        }
-        if dumped.get("errors"):
-            record["errors"] = dumped["errors"]
+        agent_errors = list(dumped.get("errors") or [])
+        record = self._empty_record(task)
+        record.update(
+            {
+                "input": prompt,
+                "output": dumped.get("output", ""),
+                "latency": dumped.get("latency", 0.0),
+                "tokens": dumped.get("tokens", {}),
+                # Preserve the legacy ``tools`` key alongside the typed
+                # trajectory so consumers that only sample ``tools`` keep
+                # working; the canonical trajectory is the source of truth.
+                "tools": [
+                    entry.get("name")
+                    for entry in dumped.get("trajectory", [])
+                    if entry.get("name")
+                ],
+                "trajectory": dumped.get("trajectory", []),
+                "status": "success",
+                "errors": agent_errors,
+                # Success records may still carry a first-error scalar so a
+                # parser that has historically read ``error`` keeps the same
+                # key on the success shape (None when nothing went wrong).
+                "error": agent_errors[0] if agent_errors else None,
+                "expected_output": expected_output,
+                "chaos_report": chaos_report,
+                "perf_report": perf_report,
+                "verification_parse_errors": list(verification_parse_errors or []),
+            }
+        )
         return record
 
-    def use_mcp_skill_paths(self) -> tuple[str, ...]:
-        """Return the skill paths the harness granted (snapshot for the record).
+    def _build_failed_record(
+        self,
+        task: Task,
+        exc: Exception,
+        *,
+        verification_parse_errors: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Build a failed-task record so the failure stays visible.
 
-        Pulled off the env-derived capability aggregate so the value on the
-        run record matches what the agent actually saw, without requiring
-        every consumer to re-read ``AGENT_SKILLS_PATHS``.
+        Emits the **same** top-level key set as :meth:`_build_success_record`
+        (the D3 symmetric union pinned in :attr:`_RECORD_KEYS`): a downstream
+        parser iterating either shape never trips a ``KeyError`` crossing
+        between them. The differences are values only — ``status=\"failed\"``,
+        ``error`` carries the exception text, ``score`` stays the legacy
+        aggregate ``0``, ``scores`` stays empty.
         """
-        return AgentConfig.from_env().capabilities.skills.paths
+        error_text = str(exc)
+        record = self._empty_record(task)
+        record.update(
+            {
+                "input": task.prompt,
+                "expected_output": task.expected_output,
+                "status": "failed",
+                "error": error_text,
+                "errors": [error_text],
+                "verification_parse_errors": list(verification_parse_errors or []),
+            }
+        )
+        return record
 
-    def _failed_record(self, task: Task, exc: Exception) -> dict[str, Any]:
-        """Build a minimal failed-task record so the failure stays visible.
+    def _empty_record(self, task: Task) -> dict[str, Any]:
+        """Seed every record with the D3 symmetric key set.
 
-        Carries through the task's identifying fields and capability
-        metadata so the on-disk schema is identical to a successful record
-        (Decision D3) — only ``status``/``error``/``score`` differ.
+        Centralizes the default values for the keys that match across
+        success/failed records (task identifying fields, opaque blobs, empty
+        containers for ``scores`` / ``tools`` / ``trajectory`` etc.). Both
+        builder methods overlay the differing keys on top of this seed; the
+        seed itself never contains a ``status`` value so the caller must set
+        it explicitly.
         """
         return {
             "input": task.prompt,
@@ -661,12 +790,18 @@ class DefaultHarness(Harness):
             "tokens": {},
             "tools": [],
             "trajectory": [],
-            "skills": list(self.use_mcp_skill_paths()),
+            "skills": list(self._granted_skill_paths),
             "name": task.name,
-            "status": "failed",
-            "error": str(exc),
+            "status": "",
+            "error": None,
+            "errors": [],
+            # Legacy aggregate slot retained for back-compat. ``scores`` (the
+            # per-metric mapping) is populated by ``_score`` for success
+            # records; failed records leave it as the empty dict so the key
+            # is always present.
             "score": 0,
-            "expected_output": task.expected_output,
+            "scores": {},
+            "expected_output": "",
             "expected_output_raw": task.expected_output,
             "retrieval_context": list(task.retrieval_context),
             "chaos_spec": task.chaos_spec,
@@ -676,8 +811,9 @@ class DefaultHarness(Harness):
             "documentation": [doc.model_dump() for doc in task.documentation],
             "capabilities_granted": {
                 "use_mcp": self.use_mcp,
-                "skills": list(self.use_mcp_skill_paths()),
+                "skills": list(self._granted_skill_paths),
             },
+            "verification_parse_errors": [],
         }
 
     def _drain_scenario(
@@ -686,6 +822,12 @@ class DefaultHarness(Harness):
         scenario_thread: threading.Thread | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Join the scenario thread and return its chaos and perf reports.
+
+        If the join times out (i.e. ``thread.is_alive()`` after the budget),
+        a warning is logged and the returned ``chaos_report["status"]`` is
+        stamped to ``"timed_out"`` so a partial report is flagged on the
+        record rather than silently mislabelled as the last status the
+        scenario reached before the cutoff.
 
         Args:
             scenario_manager: The running scenario, or None.
@@ -699,7 +841,19 @@ class DefaultHarness(Harness):
             return {}, {}
         _log.info("waiting for background metrics collection to complete...")
         scenario_thread.join(timeout=_SCENARIO_JOIN_SEC)
-        return scenario_manager.get_reports()
+        chaos_report, perf_report = scenario_manager.get_reports()
+        if scenario_thread.is_alive():
+            _log.warning(
+                "scenario thread still alive after %ss join budget; "
+                "stamping chaos_report.status='timed_out'",
+                _SCENARIO_JOIN_SEC,
+            )
+            # Preserve any partial fields the thread populated before the
+            # cutoff (injected_fault / name / output) so the operator can
+            # see how far it got.
+            chaos_report = dict(chaos_report)
+            chaos_report["status"] = "timed_out"
+        return chaos_report, perf_report
 
     def _teardown(
         self, deployer: Any, infra_config: dict[str, Any], name: str

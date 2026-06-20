@@ -161,6 +161,11 @@ class ScenarioManager:
 
         verification_node = self._resolve_verification(spec.verify)
         if verification_node is None:
+            # No verification scheduled (``verify`` was None) — leave the
+            # chaos_report alone. An UNKNOWN key, on the other hand, has
+            # already stamped ``chaos_report["verification"]`` with the
+            # failure record so the operator sees the typo'd cross-reference
+            # on the run record, not just in the log.
             return
 
         _log.info("starting planned verification using VerifierAgent...")
@@ -250,8 +255,17 @@ class ScenarioManager:
 
         time.sleep(_PORT_FORWARD_SETTLE_SEC)
         if self.pf_process.poll() is not None:
+            # Reap the already-exited child before raising so it does not
+            # linger as a zombie waiting for ``wait()``. ``terminate`` is a
+            # no-op on a process that already exited; ``wait`` collects the
+            # exit status.
+            returncode = self.pf_process.returncode
+            try:
+                self.pf_process.wait(timeout=_PORT_FORWARD_SETTLE_SEC)
+            except Exception as exc:  # noqa: BLE001 - never mask the raise reason
+                _log.warning("error reaping early-exited port-forward: %s", exc)
             raise RuntimeError(
-                f"kubectl port-forward exited early (code {self.pf_process.returncode}) "
+                f"kubectl port-forward exited early (code {returncode}) "
                 f"for deployment/{self.target_deployment} in {self.namespace!r}"
             )
 
@@ -309,20 +323,35 @@ class ScenarioManager:
 
         Returns:
             The mapped verification node (already validated) when the key is
-            present and known; ``None`` when the spec opts out or the key is
-            unknown (a warning is logged so a typo'd cross-reference does not
-            silently drop verification).
+            present and known; ``None`` when the spec opts out **or** the
+            key is unknown. The unknown-key case is *not* silent — a
+            verification-failure entry is written into ``chaos_report``
+            naming the missing key + the available keys, so a typo'd
+            cross-reference shows up on the run record (not just in the
+            log).
         """
         if not verify_ref:
             return None
         node = self.verification_mapping.get(verify_ref)
         if node is None:
-            _log.warning(
-                "chaos verify reference %r not found in verification mapping; "
-                "known keys: %s",
-                verify_ref,
-                sorted(self.verification_mapping.keys()),
+            known = sorted(self.verification_mapping.keys())
+            reason = (
+                f"chaos verify reference {verify_ref!r} not found in "
+                f"verification mapping; known keys: {known}"
             )
+            _log.warning(reason)
+            # Surface the unresolved reference on the chaos_report so the
+            # operator sees the typo'd cross-reference in results.json, not
+            # just in the log. The shape mirrors the typed
+            # VerificationResult dump (success/reason/name) so downstream
+            # consumers don't need a special-case parse path.
+            self.result_holder["chaos_report"]["verification"] = {
+                "success": False,
+                "reason": reason,
+                "name": verify_ref,
+                "unresolved_reference": verify_ref,
+                "known_references": known,
+            }
             return None
         return node
 

@@ -142,12 +142,18 @@ def test_only_one_executable_use_mcp_read_in_repo(
     import re
 
     devops_bench_root = Path(__file__).resolve().parents[3] / "devops_bench"
-    # Match a read of the env: either ``get_bool("BENCH_USE_MCP", ...)`` /
-    # ``get_env("BENCH_USE_MCP", ...)`` or a raw ``"BENCH_USE_MCP"`` indexed
-    # off ``os.environ``. This is the substring search a reviewer would do
-    # to verify §7 compliance, codified.
+    # Match every realistic way a Python module reads BENCH_USE_MCP — the
+    # core helpers (``get_bool``, ``get_env``, ``first_env``), the stdlib
+    # ``os.getenv`` / ``os.environ.get`` / ``os.environ[...]`` paths, and
+    # bare ``environ["..."]`` (e.g. ``from os import environ``). A reviewer
+    # eyeballing §7 compliance would search for any of these; codify the
+    # search so a sneaked-in second read fails CI instead of passing review.
     read_pattern = re.compile(
-        r"(get_bool|get_env|os\.environ\.get|os\.environ\[)\s*\(?\s*[\"']BENCH_USE_MCP[\"']"
+        r"("
+        r"get_bool|get_env|first_env|os\.getenv|"
+        r"os\.environ\.get|os\.environ\[|"
+        r"\bgetenv|\benviron\["
+        r")\s*\(?\s*[\"']BENCH_USE_MCP[\"']"
     )
     reads: dict[Path, int] = {}
     for path in devops_bench_root.rglob("*.py"):

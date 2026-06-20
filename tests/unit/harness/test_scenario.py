@@ -173,8 +173,13 @@ def test_scenario_resolves_verify_against_mapping() -> None:
     }
 
 
-def test_scenario_unknown_verify_key_logs_and_skips() -> None:
-    """An unmapped ``verify:`` key is logged + skipped, never silent-dropped."""
+def test_scenario_unknown_verify_key_surfaces_failure_into_report() -> None:
+    """An unmapped ``verify:`` key writes a verification-failure entry, not silence.
+
+    The chaos seam never silently drops a verify reference — a typo'd key
+    must be visible on ``results.json``, not just in the log, so the
+    operator can spot a broken cross-reference without trawling stdout.
+    """
     spec = _build_spec(verify_key="not-in-mapping")
 
     with (
@@ -196,11 +201,15 @@ def test_scenario_unknown_verify_key_logs_and_skips() -> None:
         )
         manager.run_chaos_and_verification(spec, _build_ctx())
 
-    # Never called — the unknown key was logged + skipped.
+    # Never called — the unknown key short-circuited before dispatch.
     mock_wait.assert_not_called()
     chaos_report, _ = manager.get_reports()
     assert chaos_report["status"] == "success"
-    assert "verification" not in chaos_report
+    verification = chaos_report["verification"]
+    assert verification["success"] is False
+    assert verification["unresolved_reference"] == "not-in-mapping"
+    assert verification["known_references"] == ["some-other-key"]
+    assert "not found" in verification["reason"]
 
 
 def test_chaos_failure_lands_typed_error_into_report() -> None:

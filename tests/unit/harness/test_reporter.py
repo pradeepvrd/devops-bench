@@ -12,11 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``ResultReporter`` golden test for the preserved ``results.json`` schema (D3).
+"""Golden tests for the preserved ``results.json`` schema (Decision D3).
 
-Pin the on-disk schema the harness emits so a future refactor that touches
-``DefaultHarness._build_success_record`` can not silently shift keys / types
-the dashboards / downstream parsers depend on.
+Two invariants are pinned here:
+
+1. **The ``ResultReporter`` writes the input list verbatim.** The reporter is
+   a thin sink the engine depends on (``harness-refactor-handoff.md`` §8);
+   it must not reshape the payload.
+2. **Success and failed records carry the *same* top-level key set.** A
+   downstream parser iterating one shape can never ``KeyError`` crossing
+   into the other. The tests drive the production code path by invoking
+   :meth:`DefaultHarness._build_success_record` /
+   :meth:`DefaultHarness._build_failed_record` on a stub
+   :class:`AgentResult` and asserting ``set(record.keys()) == required_keys``.
+   A hand-rolled dict would let the builders drift silently — these tests
+   intentionally exercise the real builders.
 """
 
 from __future__ import annotations
@@ -24,29 +34,97 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from devops_bench.agents.result import AgentResult, ToolCall
-from devops_bench.harness.reporter import ResultReporter
+import pytest
 
-_RESULTS_JSON_REQUIRED_KEYS: set[str] = {
-    "input",
-    "output",
-    "latency",
-    "tokens",
-    "tools",
-    "trajectory",
-    "skills",
-    "name",
-    "status",
-    "expected_output",
-    "expected_output_raw",
-    "retrieval_context",
-    "chaos_spec",
-    "verification_spec",
-    "chaos_report",
-    "perf_report",
-    "documentation",
-    "capabilities_granted",
-}
+from devops_bench.agents.result import AgentResult, ToolCall
+from devops_bench.harness.default import DefaultHarness
+from devops_bench.harness.reporter import ResultReporter
+from devops_bench.tasks import Task
+
+# Pinned legacy + symmetric-union key set. Every key listed here must be
+# present on *both* the success record and the failed record (Decision D3).
+# A reader iterating one shape may rely on every key being present on the
+# other — the previous schema asymmetry that motivated this fix is gone.
+_RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
+    {
+        "input",
+        "output",
+        "latency",
+        "tokens",
+        "tools",
+        "trajectory",
+        "skills",
+        "name",
+        "status",
+        "error",
+        "errors",
+        "score",
+        "scores",
+        "expected_output",
+        "expected_output_raw",
+        "retrieval_context",
+        "chaos_spec",
+        "verification_spec",
+        "chaos_report",
+        "perf_report",
+        "documentation",
+        "capabilities_granted",
+        "verification_parse_errors",
+    }
+)
+
+
+@pytest.fixture
+def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip every ``BENCH_*`` / ``AGENT_*`` knob the harness reads.
+
+    Keeps the test deterministic — without it the developer's shell env
+    could grant skills or MCP that the golden assertions don't expect.
+    """
+    for var in (
+        "BENCH_USE_MCP",
+        "BENCH_AGENT_TYPE",
+        "AGENT_MCP_SERVER",
+        "AGENT_ALLOWED_TOOLS",
+        "AGENT_SKILLS_PATHS",
+        "AGENT_RULES_TEXT",
+        "AGENT_TARGET",
+        "AGENT_MODEL",
+        "AGENT_PROVIDER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _stub_task() -> Task:
+    """Build a typed task with a few non-trivial fields the records carry."""
+    return Task.from_dict(
+        {
+            "task_id": "demo-1",
+            "name": "demo",
+            "prompt": "do the thing",
+            "expected_output": "exp",
+            "retrieval_context": ["doc-a"],
+            "chaos_spec": {"chaos": "yes"},
+            "verification_spec": {"verify": "yes"},
+        }
+    )
+
+
+def _stub_agent_result() -> AgentResult:
+    """Build an agent result with output, trajectory, tokens, latency populated."""
+    return AgentResult(
+        output="done",
+        trajectory=[
+            ToolCall(
+                name="run_command",
+                args={"command": "kubectl get pods"},
+                result="pod/web-app Running",
+                status="completed",
+            ).to_dict()
+        ],
+        tokens={"input": 10, "output": 5},
+        latency=1.5,
+    )
 
 
 def test_reporter_writes_results_json_with_indented_payload(tmp_path: Path) -> None:
@@ -70,47 +148,151 @@ def test_new_run_dir_returns_unique_path_under_root(tmp_path: Path) -> None:
     assert a.name.startswith("run_")
 
 
-def test_legacy_success_record_keys_are_emitted_verbatim() -> None:
-    """A typed :class:`AgentResult` round-trips through the preserved schema.
+def test_legacy_success_record_keys_are_emitted_verbatim(
+    isolated_env: None,
+) -> None:
+    """A real ``_build_success_record`` invocation matches the golden key set.
 
-    The golden key set is the legacy ``results.json`` schema (Decision D3) the
-    metrics layer + dashboards consume. The new ``capabilities_granted`` key
-    is additive — every legacy reader ignores unknown keys, so adding a
-    capability snapshot to the record is schema-compatible.
+    The test drives the production code path — earlier versions asserted a
+    hand-rolled dict, which let the builder drift away from the golden
+    schema undetected. Today the key set is asserted on the actual output.
     """
-    # The shape ``_build_success_record`` returns is byte-identical to the
-    # legacy result; pin it here so a refactor must update the test
-    # deliberately if it intends to change the on-disk schema.
-    agent_result = AgentResult(
-        output="done",
-        trajectory=[ToolCall(name="run_command", args={"x": 1}).to_dict()],
-        tokens={"input": 10, "output": 5},
-        latency=1.5,
-    )
-    dumped = agent_result.to_dict()
-    record = {
-        "input": "prompt",
-        "output": dumped["output"],
-        "latency": dumped["latency"],
-        "tokens": dumped["tokens"],
-        "tools": ["run_command"],
-        "trajectory": dumped["trajectory"],
-        "skills": [],
-        "name": "demo",
-        "status": "success",
-        "expected_output": "exp",
-        "expected_output_raw": "exp",
-        "retrieval_context": [],
-        "chaos_spec": None,
-        "verification_spec": None,
-        "chaos_report": {},
-        "perf_report": {},
-        "documentation": [],
-        "capabilities_granted": {"use_mcp": True, "skills": []},
-    }
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+    task = _stub_task()
+    agent_res = _stub_agent_result()
 
-    assert set(record.keys()) >= _RESULTS_JSON_REQUIRED_KEYS
-    # Types: keep the legacy shape for the most-consumed fields.
-    assert isinstance(record["trajectory"], list)
-    assert isinstance(record["tokens"], dict)
-    assert isinstance(record["latency"], float)
+    record = harness._build_success_record(  # noqa: SLF001 - testing internals
+        task=task,
+        prompt="resolved prompt",
+        expected_output="resolved expected",
+        agent_res=agent_res,
+        chaos_report={"status": "success"},
+        perf_report={"uptime_percentage": 100.0},
+    )
+
+    # Exact key equality — no drift in either direction.
+    assert set(record.keys()) == _RESULTS_JSON_REQUIRED_KEYS
+    # Spot-check the success-specific values.
+    assert record["status"] == "success"
+    assert record["output"] == "done"
+    assert record["trajectory"][0]["name"] == "run_command"
+    assert record["tokens"] == {"input": 10, "output": 5}
+    # The error/errors slots are present but empty on a clean success run.
+    assert record["error"] is None
+    assert record["errors"] == []
+    # Pre-scoring, ``scores`` is the empty dict; ``_score`` writes into it.
+    assert record["scores"] == {}
+    assert record["score"] == 0
+    # Capabilities snapshot rides on every record (CONVENTIONS.md §7 closure).
+    assert record["capabilities_granted"]["use_mcp"] is True  # default get_bool
+    assert record["capabilities_granted"]["skills"] == []
+
+
+def test_legacy_failed_record_keys_are_emitted_verbatim(
+    isolated_env: None,
+) -> None:
+    """A real ``_build_failed_record`` invocation matches the SAME golden set.
+
+    This is the BLOCKING D3 fix: success and failed records used to carry
+    different key sets (success: ``errors`` + ``scores``; failed: ``error``
+    + ``score``), so a parser iterating one would ``KeyError`` on the
+    other. The symmetric union pinned here removes that asymmetry.
+    """
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+    task = _stub_task()
+    exc = RuntimeError("deployer.up() failed")
+
+    record = harness._build_failed_record(task, exc)  # noqa: SLF001
+
+    # Exact key equality — IDENTICAL to the success golden set.
+    assert set(record.keys()) == _RESULTS_JSON_REQUIRED_KEYS
+    # Failed-specific values.
+    assert record["status"] == "failed"
+    assert record["error"] == "deployer.up() failed"
+    assert record["errors"] == ["deployer.up() failed"]
+    assert record["score"] == 0
+    assert record["scores"] == {}
+    assert record["output"] == ""
+    assert record["trajectory"] == []
+    # Capabilities snapshot rides on failed records too, so dashboards
+    # always see what the harness granted, even on a crash.
+    assert "use_mcp" in record["capabilities_granted"]
+
+
+def test_success_and_failed_records_have_identical_top_level_keys(
+    isolated_env: None,
+) -> None:
+    """Direct invariant: ``set(success.keys()) == set(failed.keys())``.
+
+    Reviewer-requested explicit assertion — the previous schema mismatch
+    (success had ``errors``+``scores``; failed had ``error``+``score``) is
+    pinned away here so a future change has to break this test to
+    re-introduce the asymmetry.
+    """
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+    task = _stub_task()
+
+    success = harness._build_success_record(  # noqa: SLF001
+        task=task,
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+    )
+    failed = harness._build_failed_record(task, RuntimeError("boom"))  # noqa: SLF001
+
+    assert set(success.keys()) == set(failed.keys())
+    # And both equal the pinned golden union.
+    assert set(success.keys()) == _RESULTS_JSON_REQUIRED_KEYS
+
+
+def test_record_keys_class_constant_matches_golden(isolated_env: None) -> None:
+    """The harness's :attr:`_RECORD_KEYS` constant is the authoritative source.
+
+    Pinning it here means a future contributor who adds a record field
+    (and updates ``_RECORD_KEYS`` + both builders) must also update the
+    golden constant in this test file — a single coordinated edit catches
+    drift in either direction.
+    """
+    assert DefaultHarness._RECORD_KEYS == _RESULTS_JSON_REQUIRED_KEYS  # noqa: SLF001
+
+
+def test_verification_parse_errors_flow_into_success_record(
+    isolated_env: None,
+) -> None:
+    """Verification-spec parse failures land on ``verification_parse_errors``."""
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="p",
+        expected_output="e",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+        verification_parse_errors=[
+            {"name": "broken", "reason": "missing type discriminator"}
+        ],
+    )
+    assert record["verification_parse_errors"] == [
+        {"name": "broken", "reason": "missing type discriminator"}
+    ]
+
+
+def test_verification_parse_errors_flow_into_failed_record(
+    isolated_env: None,
+) -> None:
+    """The same plumbing exists on the failed path.
+
+    A verification authoring failure must never be lost to a deployer
+    crash — the operator should see both on the failed record.
+    """
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+    record = harness._build_failed_record(  # noqa: SLF001
+        _stub_task(),
+        RuntimeError("boom"),
+        verification_parse_errors=[{"name": "broken", "reason": "bad type"}],
+    )
+    assert record["verification_parse_errors"] == [
+        {"name": "broken", "reason": "bad type"}
+    ]
