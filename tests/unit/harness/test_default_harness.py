@@ -29,9 +29,11 @@ from typing import Any
 
 import pytest
 
+from devops_bench.agents.result import AgentResult
 from devops_bench.core import MissingDependencyError
 from devops_bench.harness import default as harness_default
 from devops_bench.harness.default import DefaultHarness
+from devops_bench.tasks import Task
 
 
 @pytest.fixture
@@ -143,6 +145,80 @@ def test_granted_skill_paths_snapshot_captured_once(
     # tuple is the authority for the rest of the run.
     monkeypatch.setenv("AGENT_SKILLS_PATHS", "/skills/x")
     assert harness._granted_skill_paths == ("/skills/a", "/skills/b")  # noqa: SLF001
+
+
+def test_build_agent_config_returns_identical_snapshot_across_calls(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``build_agent_config`` is a pure accessor over the __init__ snapshot.
+
+    Two back-to-back calls must return the **same object identity** so the
+    agent the harness constructs cannot differ from the config the
+    record's ``capabilities_granted`` was derived from. A previous version
+    re-read ``AgentConfig.from_env()`` per call, opening a desync window
+    that mid-batch env mutation could exploit.
+    """
+    monkeypatch.setenv("AGENT_SKILLS_PATHS", "/skills/a")
+    monkeypatch.setenv("BENCH_USE_MCP", "true")
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+
+    a = harness.build_agent_config()
+    b = harness.build_agent_config()
+    # Identity — not just equality — pins the no-rebuild invariant.
+    assert a is b
+    assert a.capabilities.skills.paths == ("/skills/a",)
+
+
+def test_capabilities_granted_matches_agent_config_even_after_env_mutation(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``capabilities_granted`` exactly mirrors the agent's actual config.
+
+    This is the consistency invariant the senior reviewer flagged: env
+    mutated AFTER ``DefaultHarness(...)`` construction must not desync
+    what the agent was built with from what the record claims it was
+    built with. Both come from the single ``__init__`` snapshot.
+    """
+    monkeypatch.setenv("AGENT_SKILLS_PATHS", "/skills/granted")
+    monkeypatch.setenv("AGENT_MCP_SERVER", "/path/to/mcp")
+    monkeypatch.setenv("AGENT_ALLOWED_TOOLS", "tool_a")
+    monkeypatch.setenv("BENCH_USE_MCP", "true")
+    harness = DefaultHarness(project_id="p", cluster_name="c")
+
+    # Drift the env AFTER construction. The harness must still report
+    # what was granted at construction, not what the env now says.
+    monkeypatch.setenv("AGENT_SKILLS_PATHS", "/skills/leaked-after-init")
+    monkeypatch.setenv("BENCH_USE_MCP", "false")
+    monkeypatch.delenv("AGENT_MCP_SERVER", raising=False)
+
+    config = harness.build_agent_config()
+    task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+    success = harness._build_success_record(  # noqa: SLF001
+        task=task,
+        prompt="p",
+        expected_output="e",
+        agent_res=AgentResult(output="ok", trajectory=[]),
+        chaos_report={},
+        perf_report={},
+    )
+    failed = harness._build_failed_record(  # noqa: SLF001
+        task, RuntimeError("boom")
+    )
+
+    # The record's ``skills`` and ``capabilities_granted.skills`` come
+    # from the same snapshot the agent was built from. The post-init env
+    # mutation must NOT leak through.
+    expected_skills = list(config.capabilities.skills.paths)
+    assert expected_skills == ["/skills/granted"]
+    for record in (success, failed):
+        assert record["skills"] == expected_skills
+        assert record["capabilities_granted"]["skills"] == expected_skills
+        # ``use_mcp`` was snapshotted True at __init__; the post-init
+        # mutation to "false" must not flip it on the record.
+        assert record["capabilities_granted"]["use_mcp"] is True
+    # And the agent's actual MCP binding agrees — the post-init delenv
+    # of AGENT_MCP_SERVER did NOT drop the binding the agent runs with.
+    assert config.capabilities.mcp is not None
 
 
 def test_ensure_builtin_agents_swallows_only_import_errors(
