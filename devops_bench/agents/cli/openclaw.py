@@ -33,6 +33,13 @@ and *not* ``sessions tail`` (which redacts tool args / result bodies):
 The ``oc`` binary is a custom alias on the user's host; on any extraction
 miss the failure is recorded on ``AgentResult.errors`` rather than returning
 a silent-empty trajectory.
+
+Capability wiring (PR3): ``capabilities.rules.text`` is **prepended to the
+prompt** (separated by a blank line) before invocation. The installed ``oc``
+build has no dedicated rules / system-prompt flag, so prompt-prepending is
+the reliable, binary-agnostic delivery channel. The agent declares only
+:class:`~devops_bench.agents.capabilities.RulesMixin` — granting MCP or
+skills bindings would silently no-op against today's ``oc`` build.
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ import tempfile
 from pathlib import Path
 
 from devops_bench.agents.base import AGENTS, AgentHarness
+from devops_bench.agents.capabilities import RulesMixin
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import SubprocessError, get_logger
@@ -82,6 +90,26 @@ def _oc_model_id(config: AgentConfig) -> str:
     if provider == "gemini":
         provider = "google"
     return f"{provider}/{model}"
+
+
+def _prepend_rules(rules_text: str, prompt: str) -> str:
+    """Return ``prompt`` with ``rules_text`` prepended as an operator brief.
+
+    Empty / whitespace-only rules pass the prompt through unchanged so a
+    default :class:`AgentRules` is indistinguishable from "no preamble". A
+    non-empty brief is separated from the prompt by a blank line so the
+    model sees two distinct sections.
+
+    Args:
+        rules_text: The bound rules text (``capabilities.rules.text``).
+        prompt: The task prompt for this run.
+
+    Returns:
+        The combined string to hand to ``oc agent -m``.
+    """
+    if not rules_text or not rules_text.strip():
+        return prompt
+    return f"{rules_text.rstrip()}\n\n{prompt}"
 
 
 def _build_local_command(
@@ -253,7 +281,7 @@ def _read_export_bundle(workspace: Path) -> tuple[str, str, list[str]]:
 
 
 @AGENTS.register("openclaw")
-class OpenClawAgent(AgentHarness):
+class OpenClawAgent(RulesMixin, AgentHarness):
     """OpenClaw CLI agent harness driving the local ``oc`` binary.
 
     The binary path is resolved from ``config.target`` (which defaults to the
@@ -265,6 +293,12 @@ class OpenClawAgent(AgentHarness):
     ``oc sessions export-trajectory`` command into a per-run temp workspace
     and parsed into the canonical :class:`ToolCall` list.
 
+    Inherits :class:`RulesMixin` so the orchestrator can grant operator-brief
+    text uniformly. The installed ``oc`` build today exposes no in-agent MCP
+    or skills wiring, so :class:`McpMixin` / :class:`SkillsMixin` are *not*
+    declared — capability negotiation would otherwise grant a binding the
+    agent silently ignores.
+
     Args:
         config: Typed :class:`AgentConfig`; defaults are used when omitted.
         agent_name: ``oc`` agent profile (defaults to ``"operator"``).
@@ -273,8 +307,9 @@ class OpenClawAgent(AgentHarness):
     def __init__(
         self, config: AgentConfig | None = None, *, agent_name: str = "operator"
     ) -> None:
-        super().__init__(config)
+        AgentHarness.__init__(self, config)
         self.agent_name = agent_name
+        self.rules = self.config.capabilities.rules
 
     def _resolve_oc_bin(self) -> str:
         """Pick the ``oc`` binary path from config or fall back."""
@@ -284,9 +319,18 @@ class OpenClawAgent(AgentHarness):
         return candidate if os.path.exists(candidate) else "oc"
 
     def _execute(self, prompt: str) -> AgentResult:
-        """Run ``oc agent --local`` and extract the canonical trajectory."""
+        """Run ``oc agent --local`` and extract the canonical trajectory.
+
+        When ``capabilities.rules.text`` is non-empty, the rules are
+        **prepended to the prompt** (separated by a blank line) before being
+        passed to ``oc agent -m``. The installed ``oc`` build exposes no
+        dedicated rules / system-prompt flag, so prompt-prepending is the
+        reliable, binary-agnostic delivery channel — every model the agent
+        drives reads the prompt, so the operator brief always lands.
+        """
         oc_bin = self._resolve_oc_bin()
-        command = _build_local_command(self.config, prompt, self.agent_name, oc_bin)
+        final_prompt = _prepend_rules(self.config.capabilities.rules.text, prompt)
+        command = _build_local_command(self.config, final_prompt, self.agent_name, oc_bin)
 
         try:
             completed = subprocess.run(

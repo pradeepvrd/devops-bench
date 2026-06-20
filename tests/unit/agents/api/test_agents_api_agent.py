@@ -29,7 +29,23 @@ from devops_bench.agents.api.agent import (
     extract_tokens,
     fold_trajectory,
 )
+from devops_bench.agents.capabilities import (
+    AgentCapabilities,
+    AgentRules,
+    McpBinding,
+    SkillBinding,
+    SupportsMcp,
+    SupportsRules,
+    SupportsSkills,
+)
 from devops_bench.models.base import LLMClient
+
+
+def _mcp_caps(command: str = "server", *, tools: tuple[str, ...] = ()) -> AgentCapabilities:
+    """Helper: build capabilities that turn the API agent's MCP path on."""
+    return AgentCapabilities(
+        mcp_servers=(McpBinding(name="test", command=tuple(command.split()), tools=tools),),
+    )
 
 # ---------------------------------------------------------------------------
 # Test doubles
@@ -362,8 +378,13 @@ def test_extract_tokens_preserves_legacy_on_disk_key_scheme():
 # ---------------------------------------------------------------------------
 
 
-def test_execute_runs_with_no_tools_when_target_unset(monkeypatch):
-    """With no MCP server and no skills, the loop runs tool-less."""
+def test_execute_runs_with_no_tools_when_capabilities_default(monkeypatch):
+    """Default capabilities (no MCP binding, no skills) → loop runs tool-less.
+
+    Renamed from ``..._when_target_unset`` because the MCP gate is no longer
+    ``config.target`` — it's ``config.capabilities.mcp``. The old name
+    survives in git history but the new one matches the post-PR3 reality.
+    """
     fake = _FakeLLMClient(
         [
             _Turn(
@@ -481,7 +502,7 @@ def test_execute_folds_assistant_tool_pairs_into_canonical_trajectory(monkeypatc
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
     monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
 
-    result = ApiAgent(AgentConfig(target="server")).run("ping")
+    result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("ping")
 
     assert result.output == "done"
     assert result.trajectory == [
@@ -529,7 +550,7 @@ def test_execute_dispatch_error_lands_in_errors_and_continues(monkeypatch):
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
     monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
 
-    result = ApiAgent(AgentConfig(target="server")).run("ping")
+    result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("ping")
 
     assert result.output == "giving up"
     assert any("Error calling tool boom" in e for e in result.errors)
@@ -587,7 +608,9 @@ def test_execute_skills_discover_without_mcp(monkeypatch, tmp_path):
         ]
     )
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    cfg = AgentConfig(skills_paths=(str(skill_dir),))  # NB: target is None
+    cfg = AgentConfig(
+        capabilities=AgentCapabilities(skills=SkillBinding(paths=(str(skill_dir),))),
+    )  # NB: no mcp binding → MCP path disabled
     result = ApiAgent(cfg).run("p")
 
     assert result.errors == []  # skill dispatch hit the file, not the MCP error
@@ -622,15 +645,37 @@ def test_execute_no_skills_no_mcp_runs_tool_less(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_execute_returns_errored_on_empty_mcp_server_string(monkeypatch):
-    """A whitespace-only ``target`` triggers ``MCPClient`` ValueError; the agent
-    converts it to an errored result rather than crashing the harness."""
+def test_execute_returns_errored_on_mcpclient_value_error(monkeypatch):
+    """A ``ValueError`` from ``MCPClient.__aenter__`` (e.g. an unspawnable
+    server command) must convert to an errored :class:`AgentResult` rather
+    than bubbling through the base safety net.
+
+    After PR3's ``shlex.join`` fix, a whitespace-only binding command is no
+    longer lossy-collapsed to ``""``, so the *binding* path no longer
+    triggers MCPClient's empty-string guard naturally. We instead patch
+    ``MCPClient`` to raise the same ``ValueError`` directly, which exercises
+    the agent-side conversion path.
+    """
+
+    class _BoomMCP:
+        def __init__(self, _path: str) -> None: ...
+
+        async def __aenter__(self) -> _BoomMCP:
+            raise ValueError(
+                "MCP server_path is empty; set AGENT_MCP_SERVER to the MCP "
+                "server command."
+            )
+
+        async def __aexit__(self, *_a: Any) -> None: ...
+
     fake = _FakeLLMClient([_Turn(text="never reached")])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _BoomMCP)
 
-    # Real MCPClient: raises ValueError on __aenter__ when parts == []. We use
-    # the real class here (no monkeypatch) to exercise the error path.
-    result = ApiAgent(AgentConfig(target="   ")).run("p")
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="bad", command=("/never-spawned",)),),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
     assert result.has_errors()
     assert "MCP server_path is empty" in result.errors[0]
     # The base safety net was NOT used (we converted the ValueError ourselves).
@@ -645,12 +690,13 @@ def test_execute_returns_errored_on_empty_mcp_server_string(monkeypatch):
 def test_execute_ignores_bench_use_mcp_env(monkeypatch):
     """Setting BENCH_USE_MCP must not change the agent's behavior.
 
-    The MCP on/off gate is the presence of ``config.target``, not env.
+    The MCP on/off gate is ``config.capabilities.mcp`` (a binding with a
+    non-empty ``command``), not env.
     """
     monkeypatch.setenv("BENCH_USE_MCP", "false")
     fake = _FakeLLMClient([_Turn(text="ok")])
     monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
-    # No target → loop runs without MCP regardless of the env flag.
+    # No MCP binding → loop runs without MCP regardless of the env flag.
     result = ApiAgent(AgentConfig()).run("p")
     assert result.output == "ok"
 
@@ -774,3 +820,169 @@ def test_execute_is_synchronous_and_safe_for_harness_invocation(method_name):
         f"ApiAgent.{method_name} must be synchronous so the harness can call "
         "agent.run(prompt) without managing an event loop itself."
     )
+
+
+# ---------------------------------------------------------------------------
+# PR3 — capability negotiation: ApiAgent implements every Supports* Protocol
+# ---------------------------------------------------------------------------
+
+
+def test_api_agent_satisfies_all_three_capability_protocols():
+    """``isinstance`` against each Protocol is how the harness negotiates
+    capabilities before granting a binding (handoff §6). ApiAgent declares
+    every capability it can drive — MCP, skills, rules — so an instance must
+    pass each ``runtime_checkable`` check."""
+    agent = ApiAgent(AgentConfig())
+    assert isinstance(agent, SupportsMcp)
+    assert isinstance(agent, SupportsSkills)
+    assert isinstance(agent, SupportsRules)
+
+
+def test_api_agent_mirrors_capability_bindings_onto_mixin_attributes():
+    """The structural-Protocol attributes (``mcp_servers``/``skills``/``rules``)
+    must reflect the bindings the orchestrator granted; otherwise capability
+    negotiation would see the mixin defaults instead of the live config."""
+    binding = McpBinding(name="x", command=("/bin/mcp",), tools=("t",))
+    caps = AgentCapabilities(
+        mcp_servers=(binding,),
+        skills=SkillBinding(paths=("/sk",)),
+        rules=AgentRules(text="rules"),
+    )
+    agent = ApiAgent(AgentConfig(capabilities=caps))
+    assert agent.mcp_servers == (binding,)
+    assert agent.skills == SkillBinding(paths=("/sk",))
+    assert agent.rules == AgentRules(text="rules")
+
+
+# ---------------------------------------------------------------------------
+# Skills ⊥ MCP independence still holds under the binding-based config
+# ---------------------------------------------------------------------------
+
+
+def test_execute_runs_with_mcp_only_no_skills(monkeypatch):
+    """MCP binding present, skills binding empty → MCP path opens, no skills loaded."""
+    fc = [{"name": "do_thing", "args": {}, "id": "c1"}]
+    fake = _FakeLLMClient([_Turn(text="working", calls=fc), _Turn(text="done")])
+    mcp_tools = [SimpleNamespace(name="do_thing", description="d", inputSchema=None)]
+    mcp = _FakeMCPClient(tools=mcp_tools)
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+
+    result = ApiAgent(AgentConfig(capabilities=_mcp_caps("server"))).run("p")
+    assert result.errors == []
+    assert mcp.entered
+    assert "skills_loaded" not in result.metadata  # SkillBinding stayed empty
+
+
+def test_execute_runs_with_both_mcp_and_skills(monkeypatch, tmp_path):
+    """Both bindings populated → MCP session is opened *and* skills are discovered."""
+    skill_dir = tmp_path / "skills"
+    (skill_dir / "demo").mkdir(parents=True)
+    (skill_dir / "demo" / "SKILL.md").write_text(
+        '---\nname: "demo"\ndescription: x\n---\nbody\n'
+    )
+
+    fc = [{"name": "do_thing", "args": {}, "id": "c1"}]
+    fake = _FakeLLMClient([_Turn(text="working", calls=fc), _Turn(text="done")])
+    mcp = _FakeMCPClient(tools=[SimpleNamespace(name="do_thing", description="d", inputSchema=None)])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", lambda _path: mcp)
+
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="t", command=("server",)),),
+        skills=SkillBinding(paths=(str(skill_dir),)),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert result.errors == []
+    assert mcp.entered
+    assert result.metadata["skills_loaded"] == ["demo"]
+
+
+def test_execute_runs_with_neither_mcp_nor_skills(monkeypatch):
+    """Default capabilities → tool-less run, no MCP session, no skills loaded."""
+    fake = _FakeLLMClient([_Turn(text="bare")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    # If MCPClient is ever entered the test would import mcp; replace with a sentinel.
+    monkeypatch.setattr(
+        agent_mod, "MCPClient", lambda _path: pytest.fail("MCPClient must not be used")
+    )
+    result = ApiAgent(AgentConfig()).run("p")
+    assert result.output == "bare"
+    assert result.errors == []
+    assert "skills_loaded" not in result.metadata
+
+
+# ---------------------------------------------------------------------------
+# Rules flow into the loop's system_instruction
+# ---------------------------------------------------------------------------
+
+
+def test_execute_threads_rules_text_into_system_instruction(monkeypatch):
+    """Non-empty rules text must ride on the provider's ``system_instruction``."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    caps = AgentCapabilities(rules=AgentRules(text="be careful"))
+    ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert fake.calls[0]["system_instruction"] == "be careful"
+
+
+def test_execute_empty_rules_text_yields_none_system_instruction(monkeypatch):
+    """Empty rules text → ``system_instruction=None`` (the loop's "no preamble")."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    ApiAgent(AgentConfig()).run("p")
+    assert fake.calls[0]["system_instruction"] is None
+
+
+# ---------------------------------------------------------------------------
+# Mcp gate: an empty-command McpBinding does NOT open an MCP session in the
+# API agent (it is for CLI agents whose binary launches MCP in-process).
+# ---------------------------------------------------------------------------
+
+
+def test_execute_skips_mcp_when_binding_has_no_command(monkeypatch):
+    """A binding with no launch command (CLI-agent shape) → API agent runs MCP-off."""
+    fake = _FakeLLMClient([_Turn(text="ok")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(
+        agent_mod, "MCPClient", lambda _path: pytest.fail("MCPClient must not be used")
+    )
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="cli-shape", command=(), tools=("x",)),),
+    )
+    result = ApiAgent(AgentConfig(capabilities=caps)).run("p")
+    assert result.output == "ok"
+
+
+def test_execute_preserves_spaced_command_token_through_shlex_roundtrip(monkeypatch):
+    """A spaced argv token (``("uv run", "mcp-server")``) must reach MCPClient
+    intact: ``shlex.join`` quotes it on the way in, ``MCPClient``'s
+    ``shlex.split`` recovers the original parts on the way out.
+
+    Regression for the lossy ``" ".join`` that previously silently expanded
+    one token into two when the binding carried a spaced word (e.g. a launch
+    command that wraps an interpreter invocation).
+    """
+    import shlex
+
+    captured: dict = {}
+
+    class _RecordingMCP(_FakeMCPClient):
+        def __init__(self, path: str) -> None:
+            super().__init__(tools=[])
+            captured["path"] = path
+
+    fake = _FakeLLMClient([_Turn(text="done")])
+    monkeypatch.setattr(agent_mod, "get_model", lambda *a, **kw: fake)
+    monkeypatch.setattr(agent_mod, "MCPClient", _RecordingMCP)
+
+    original = ("uv run", "mcp-server", "--flag")
+    caps = AgentCapabilities(
+        mcp_servers=(McpBinding(name="spaced", command=original),),
+    )
+    ApiAgent(AgentConfig(capabilities=caps)).run("p")
+
+    # MCPClient calls ``shlex.split`` on its ``server_path``; re-splitting the
+    # path the agent handed it must recover the original tuple element-for-
+    # element, including the spaced first token.
+    assert tuple(shlex.split(captured["path"])) == original

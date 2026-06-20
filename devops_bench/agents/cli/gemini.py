@@ -19,20 +19,33 @@ stream from stdout — no ``~/.gemini/tmp/...`` disk reads, no session-id glob,
 no internal-schema parsing. ``tool_use``/``tool_result`` events fold into the
 canonical :class:`ToolCall` list; ``result`` events carry the final text and
 the aggregated token usage.
+
+Capability wiring (PR3): the allowed-tools list comes from the aggregated
+``config.capabilities.allowed_tools`` (across every bound MCP server) and the
+operator brief from ``config.capabilities.rules.text`` (written to a
+``GEMINI.md`` file in the run working directory before invocation, the CLI's
+native context-file mechanism).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
+from pathlib import Path
 
 from devops_bench.agents.base import AGENTS, AgentHarness
+from devops_bench.agents.capabilities import McpMixin, RulesMixin
 from devops_bench.agents.config import AgentConfig
 from devops_bench.agents.result import AgentResult, ToolCall
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.subprocess import run
 
 __all__ = ["GeminiCliAgent", "parse_stream_json"]
+
+# Filename the Gemini CLI auto-loads from its working directory as the
+# operator brief / startup context (its native equivalent of a system prompt).
+_GEMINI_RULES_FILE = "GEMINI.md"
 
 _log = get_logger("agents.cli.gemini")
 
@@ -180,37 +193,70 @@ def parse_stream_json(stdout: str) -> tuple[str, list[dict], dict, list[str]]:
 
 
 @AGENTS.register("gemini")
-class GeminiCliAgent(AgentHarness):
+class GeminiCliAgent(McpMixin, RulesMixin, AgentHarness):
     """Gemini CLI agent harness driving the ``gemini`` binary.
 
     The binary path is resolved from ``config.target`` (which defaults to the
     legacy ``AGENT_TARGET`` env when :meth:`AgentConfig.from_env` was used),
     falling back to ``"gemini"`` on ``$PATH``. Model / API key flow from
     ``config.model`` / ``config.api_key`` via the env overlay — never
-    hardcoded. ``config.allowed_tools`` selects between the ``--allowed-tools``
-    overlay and the ``-e=""`` extensions-disabled path.
+    hardcoded. ``config.capabilities.allowed_tools`` (aggregated across every
+    bound MCP server) selects between the ``--allowed-tools`` overlay and the
+    ``-e=""`` extensions-disabled path.
+
+    Inherits :class:`McpMixin` and :class:`RulesMixin` so
+    ``isinstance(agent, SupportsMcp / SupportsRules)`` returns ``True`` for
+    orchestrator-side capability negotiation. The mixins mirror the granted
+    bindings from the config onto the structural-Protocol attributes.
 
     The full canonical trajectory is parsed from the official
     ``--output-format stream-json`` event stream; no session files are read
     from disk.
     """
 
+    def __init__(self, config: AgentConfig | None = None) -> None:
+        AgentHarness.__init__(self, config)
+        caps = self.config.capabilities
+        self.mcp_servers = caps.mcp_servers
+        self.rules = caps.rules
+
     def _execute(self, prompt: str) -> AgentResult:
-        """Build argv, run the CLI, and parse the stream-json output."""
+        """Build argv, run the CLI, and parse the stream-json output.
+
+        When ``capabilities.rules.text`` is non-empty, the agent runs the
+        binary inside a per-run temp working directory and writes the rules
+        text to ``GEMINI.md`` there before invocation — the CLI auto-loads
+        that file as its startup context, which is the binary's native
+        delivery mechanism for an operator brief. The temp dir is cleaned up
+        when ``_execute`` returns.
+        """
         target = os.path.expanduser(self.config.target or "gemini")
-        argv = _build_argv(target, prompt, self.config.allowed_tools)
-        try:
-            completed = run(
-                argv,
-                extra_env=_build_env(self.config),
-                check=False,
-                timeout=self.config.timeout_sec,
-            )
-        except SubprocessError as exc:
-            return AgentResult.errored(f"gemini subprocess error: {exc}")
-        except OSError as exc:
-            # Missing / non-executable binary; core.subprocess.run does not wrap.
-            return AgentResult.errored(f"gemini binary unavailable: {exc}")
+        allowed_tools = self.config.capabilities.allowed_tools
+        argv = _build_argv(target, prompt, allowed_tools)
+        env_overlay = _build_env(self.config)
+        rules_text = self.config.capabilities.rules.text
+
+        with tempfile.TemporaryDirectory(prefix="gemini-run-") as tmpdir:
+            if rules_text:
+                # The Gemini CLI auto-loads ``GEMINI.md`` from its cwd as the
+                # startup context — that is the native delivery channel for
+                # the operator brief. Writing it under a per-run temp dir
+                # keeps the user's filesystem untouched and avoids races
+                # between concurrent runs.
+                (Path(tmpdir) / _GEMINI_RULES_FILE).write_text(rules_text)
+            try:
+                completed = run(
+                    argv,
+                    extra_env=env_overlay,
+                    cwd=tmpdir,
+                    check=False,
+                    timeout=self.config.timeout_sec,
+                )
+            except SubprocessError as exc:
+                return AgentResult.errored(f"gemini subprocess error: {exc}")
+            except OSError as exc:
+                # Missing / non-executable binary; core.subprocess.run does not wrap.
+                return AgentResult.errored(f"gemini binary unavailable: {exc}")
 
         output, trajectory, tokens, parse_errors = parse_stream_json(completed.stdout or "")
         errors: list[str] = list(parse_errors)
