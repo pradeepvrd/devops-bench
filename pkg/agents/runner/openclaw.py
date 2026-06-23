@@ -173,7 +173,7 @@ def run_openclaw_agent(prompt, context=None, agent_name="main"):
 
 
 @observe()
-def run_openclaw_agent_local(prompt, context=None, agent_name="operator"):
+def run_openclaw_agent_local(prompt, context=None, agent_name="main"):
     """Runs OpenClaw agent locally via subprocess (no SSH).
 
     Used when the harness, the kind cluster, and the agent are co-located on the

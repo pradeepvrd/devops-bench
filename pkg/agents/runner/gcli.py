@@ -136,8 +136,8 @@ def run_cli_agent(agent_target, prompt, context, bench_use_mcp=True, system_inst
         # When the agent, harness, and (kind) cluster are co-located on one host,
         # run oc locally instead of SSHing to the GCE VM.
         if os.environ.get("OPENCLAW_LOCAL", "false").lower() == "true":
-            return run_openclaw_agent_local(prompt, context, agent_name="operator")
-        return run_openclaw_agent(prompt, context, agent_name="operator")
+            return run_openclaw_agent_local(prompt, context, agent_name="main")
+        return run_openclaw_agent(prompt, context, agent_name="main")
         
     start_time = time.time()
     
