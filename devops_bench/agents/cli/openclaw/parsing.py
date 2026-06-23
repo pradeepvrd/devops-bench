@@ -208,9 +208,9 @@ def _pick_session_key(sessions_json: str) -> str | None:
     """Return the single session key from ``oc sessions --json`` output, or ``None``.
 
     The output may be a list of rows or a wrapper dict with a ``sessions``
-    list (per ``docs/openclaw/sessions.md``). Because the run wiped the
-    sessions dir first, exactly one row is expected; if more than one is
-    present the first is taken (with a debug log).
+    list (per ``docs/openclaw/sessions.md``). Because each run uses fresh
+    isolated state, exactly one row is expected; if more than one is present
+    the first is taken (with a debug log).
 
     Args:
         sessions_json: Raw stdout from ``oc sessions --agent <name> --json``.
