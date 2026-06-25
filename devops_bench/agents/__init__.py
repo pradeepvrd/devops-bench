@@ -18,12 +18,12 @@
 template-method :class:`AgentHarness`, the typed :class:`AgentConfig` /
 :class:`AgentResult` / :class:`ToolCall`, and the :data:`AGENTS` registry.
 
-Each concrete harness lives in a sibling module named after its canonical key
-(``cli.gemini`` / ``cli.openclaw``) and self-registers under it via
-``@AGENTS.register``. Those modules pull in heavy optional dependencies
+Each concrete harness lives in a sibling subpackage (``cli.gemini_cli`` /
+``cli.openclaw``) and self-registers under its canonical key via
+``@AGENTS.register``. Those subpackages pull in heavy optional dependencies
 (``deepeval``, provider SDKs); they are imported only when the agent is
 selected, never on package import. The harness consumer imports the builtin
-modules at call time before resolving via :data:`AGENTS`.
+subpackages at call time before resolving via :data:`AGENTS`.
 """
 
 from __future__ import annotations

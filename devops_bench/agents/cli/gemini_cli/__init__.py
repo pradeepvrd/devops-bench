@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Concrete CLI-binary agent harnesses (``gemini``, ``oc``).
+"""Gemini CLI agent harness, named to distinguish it from the Gemini model.
 
-Each harness lives in its own subpackage (:mod:`.gemini_cli`, :mod:`.openclaw`)
-that splits the run driver (``agent``) from the trajectory parsers (``parsing``)
-and self-registers under its canonical key on import via ``@AGENTS.register``.
-Subpackages are imported by the harness at call time, not by this package's
-``__init__`` — keeping the import graph light.
+The harness driver lives in :mod:`.agent` and the stream-json parser in
+:mod:`.parsing`. Importing this package self-registers the agent under the
+``"gemini"`` key via ``@AGENTS.register``.
 """
+
+from __future__ import annotations
+
+from devops_bench.agents.cli.gemini_cli.agent import GeminiCliAgent
+from devops_bench.agents.cli.gemini_cli.parsing import parse_stream_json
+
+__all__ = ["GeminiCliAgent", "parse_stream_json"]

@@ -29,15 +29,10 @@ from devops_bench.agents.capabilities import (
     SupportsRules,
     SupportsSkills,
 )
-from devops_bench.agents.cli import openclaw as oc_mod
-from devops_bench.agents.cli.openclaw import (
-    OpenClawAgent,
-    _build_local_command,
-    _oc_model_id,
-    _pick_session_key,
-    _strip_ansi,
-    parse_trajectory_export,
-)
+from devops_bench.agents.cli.openclaw import OpenClawAgent, parse_trajectory_export
+from devops_bench.agents.cli.openclaw import agent as oc_mod
+from devops_bench.agents.cli.openclaw.agent import _build_local_command, _oc_model_id
+from devops_bench.agents.cli.openclaw.parsing import _pick_session_key, _strip_ansi
 from devops_bench.core.errors import SubprocessError
 
 
@@ -417,14 +412,14 @@ def test_openclaw_agent_mirrors_rules_binding_onto_mixin_attribute():
 
 
 def test_prepend_rules_passes_prompt_through_when_rules_empty():
-    from devops_bench.agents.cli.openclaw import _prepend_rules
+    from devops_bench.agents.cli.openclaw.agent import _prepend_rules
 
     assert _prepend_rules("", "do the thing") == "do the thing"
     assert _prepend_rules("   \n  ", "do the thing") == "do the thing"
 
 
 def test_prepend_rules_separates_brief_from_prompt_with_blank_line():
-    from devops_bench.agents.cli.openclaw import _prepend_rules
+    from devops_bench.agents.cli.openclaw.agent import _prepend_rules
 
     assert _prepend_rules("be careful", "audit pods") == "be careful\n\naudit pods"
 

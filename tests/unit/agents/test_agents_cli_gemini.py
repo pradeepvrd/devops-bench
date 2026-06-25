@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for devops_bench.agents.cli.gemini."""
+"""Unit tests for devops_bench.agents.cli.gemini_cli."""
 
 from __future__ import annotations
 
@@ -29,13 +29,9 @@ from devops_bench.agents.capabilities import (
     SupportsMcp,
     SupportsRules,
 )
-from devops_bench.agents.cli import gemini as gemini_mod
-from devops_bench.agents.cli.gemini import (
-    GeminiCliAgent,
-    _build_argv,
-    _build_env,
-    parse_stream_json,
-)
+from devops_bench.agents.cli.gemini_cli import GeminiCliAgent, parse_stream_json
+from devops_bench.agents.cli.gemini_cli import agent as gemini_mod
+from devops_bench.agents.cli.gemini_cli.agent import _build_argv, _build_env
 from devops_bench.core.errors import SubprocessError
 
 

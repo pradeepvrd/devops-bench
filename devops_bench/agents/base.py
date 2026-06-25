@@ -20,8 +20,8 @@ single agent crash never aborts the benchmark. Subclasses implement
 :meth:`AgentHarness._execute` to do the provider-specific work and return an
 :class:`AgentResult`.
 
-Each concrete harness lives in a sibling module named after its canonical key
-(``cli.gemini`` / ``cli.openclaw``) and self-registers under that key via
+Each concrete harness lives in a sibling subpackage (``cli.gemini_cli`` /
+``cli.openclaw``) and self-registers under its canonical key via
 ``@AGENTS.register``. Heavy imports (``deepeval``, provider SDKs) stay
 function-local — ``import devops_bench.agents`` pulls only this module.
 """
