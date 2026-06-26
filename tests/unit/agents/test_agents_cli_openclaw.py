@@ -96,6 +96,40 @@ def test_parse_trajectory_export_folds_call_result_pairs():
     ]
 
 
+def test_parse_trajectory_export_sums_usage_across_turns():
+    """Token usage is summed across every model.completed, not just the last.
+
+    OpenClaw reports usage per turn (per model call); a multi-turn session that
+    kept only the final ``model.completed`` would undercount to a single call.
+    """
+    blob = _events(
+        {"type": "model.completed", "data": {"usage": {"input": 100, "output": 20, "total": 120}}},
+        _tool_call("1", "kubectl_get_pods", {}),
+        _tool_result("1", "pod-a Running"),
+        {"type": "model.completed", "data": {"usage": {"input": 250, "output": 30, "total": 280}}},
+        {
+            "type": "model.completed",
+            "data": {"usage": {"input": 75, "output": 15, "total": 90}, "assistantTexts": ["done"]},
+        },
+    )
+    _trajectory, tokens, output, errors = parse_trajectory_export(blob)
+    assert errors == []
+    assert output == "done"
+    assert tokens == {"input": 425, "output": 65, "total": 490}
+
+
+def test_parse_trajectory_export_sums_nested_cost_breakdown():
+    """Nested numeric mappings (e.g. a per-turn ``cost`` block) are summed too."""
+    blob = _events(
+        {"type": "model.completed", "data": {"usage": {"input": 10, "cost": {"total": 0.01}}}},
+        {"type": "model.completed", "data": {"usage": {"input": 5, "cost": {"total": 0.02}}}},
+    )
+    _trajectory, tokens, _output, errors = parse_trajectory_export(blob)
+    assert errors == []
+    assert tokens["input"] == 15
+    assert tokens["cost"]["total"] == 0.03
+
+
 def test_parse_trajectory_export_marks_failed_tool_result_as_error():
     """``isError`` (or ``details.status`` of error/failed) → status 'error'."""
     blob = _events(

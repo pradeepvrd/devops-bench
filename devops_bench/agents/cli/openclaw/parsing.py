@@ -60,6 +60,30 @@ def _join_text(content: object) -> str:
     return ""
 
 
+def _accumulate_usage(acc: dict, usage: dict) -> None:
+    """Sum one turn's token usage into a running accumulator, in place.
+
+    OpenClaw emits a ``model.completed`` event per turn (per model call), each
+    carrying that turn's ``usage``, so the session total is the sum across turns
+    rather than the value of any single ``model.completed``. Numeric fields are
+    added; nested mappings (e.g. a ``cost`` breakdown) are summed recursively;
+    booleans and other non-numeric values are ignored.
+
+    Args:
+        acc: Accumulator mutated in place.
+        usage: A single turn's usage mapping.
+    """
+    for key, value in usage.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            acc[key] = acc.get(key, 0) + value
+        elif isinstance(value, dict):
+            nested = acc.setdefault(key, {})
+            if isinstance(nested, dict):
+                _accumulate_usage(nested, value)
+
+
 def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, list[str]]:
     """Parse an ``oc sessions export-trajectory`` ``events.jsonl`` into the canonical shape.
 
@@ -85,8 +109,9 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
 
     Returns:
         A ``(trajectory, tokens, output, errors)`` tuple. ``trajectory`` is a
-        list of ``ToolCall.to_dict()`` mappings; ``output`` is the agent's final
-        answer text (``""`` when none was found).
+        list of ``ToolCall.to_dict()`` mappings; ``tokens`` is the usage summed
+        across every ``model.completed`` turn (not just the last); ``output`` is
+        the agent's final answer text (``""`` when none was found).
     """
     tokens: dict = {}
     errors: list[str] = []
@@ -151,7 +176,7 @@ def parse_trajectory_export(jsonl_text: str) -> tuple[list[dict], dict, str, lis
         elif etype == "model.completed":
             usage = data.get("usage")
             if isinstance(usage, dict):
-                tokens = usage
+                _accumulate_usage(tokens, usage)
             texts = data.get("assistantTexts")
             if isinstance(texts, list):
                 joined = "\n".join(t for t in texts if isinstance(t, str))
