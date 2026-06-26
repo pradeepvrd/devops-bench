@@ -6,6 +6,7 @@ import time
 import subprocess
 from deepeval.tracing import observe
 from pkg.agents.runner.openclaw import run_openclaw_agent, run_openclaw_agent_local
+from pkg.agents.runner.kubeagents import run_kubeagents
 
 
 def parse_gemini_cli_output(raw_output: str) -> dict:
@@ -142,6 +143,8 @@ def run_cli_agent(agent_target, prompt, context, bench_use_mcp=True, system_inst
         if os.environ.get("OPENCLAW_LOCAL", "false").lower() == "true":
             return run_openclaw_agent_local(prompt, context, agent_name=oc_agent)
         return run_openclaw_agent(prompt, context, agent_name=oc_agent)
+    elif "kubeagents" in agent_target:
+        return run_kubeagents(prompt, _context=context)
         
     start_time = time.time()
     
