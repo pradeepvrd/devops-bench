@@ -51,8 +51,36 @@ def _oc_set_model_cmd(oc_bin, sep):
     return f"{oc_bin} models set {shlex.quote(model_id)}{sep}"
 
 
+def _accumulate_usage(acc, usage):
+    """Sum one turn's token usage into a running accumulator, in place.
+
+    OpenClaw reports ``usage`` per assistant message (i.e. per model call), so
+    the session total is the sum across every turn, not the value from any single
+    turn. Numeric fields are added; nested mappings (e.g. a ``cost`` breakdown)
+    are summed recursively. Booleans and other non-numeric values are ignored.
+
+    Args:
+        acc: Accumulator mutated in place.
+        usage: A single turn's usage mapping.
+    """
+    for key, value in usage.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            acc[key] = acc.get(key, 0) + value
+        elif isinstance(value, dict):
+            nested = acc.setdefault(key, {})
+            if isinstance(nested, dict):
+                _accumulate_usage(nested, value)
+
+
 def _parse_openclaw_session(session_content):
-    """Parses an OpenClaw session JSONL into (tokens, trajectory)."""
+    """Parses an OpenClaw session JSONL into (tokens, trajectory).
+
+    ``tokens`` is the usage summed across all assistant turns; taking only the
+    last turn (as a prior version did) undercounts a multi-turn session to a
+    single model call.
+    """
     tokens = {}
     trajectory = []
     for line in session_content.strip().split("\n"):
@@ -61,11 +89,11 @@ def _parse_openclaw_session(session_content):
         except json.JSONDecodeError:
             continue
 
-        # Extract tokens from assistant message
+        # Accumulate token usage across every assistant message (per-turn usage).
         if data.get("type") == "message" and data.get("message", {}).get("role") == "assistant":
             usage = data.get("message", {}).get("usage")
-            if usage:
-                tokens = usage
+            if isinstance(usage, dict):
+                _accumulate_usage(tokens, usage)
 
         # Extract trajectory
         if data.get("type") == "message":
