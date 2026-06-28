@@ -361,6 +361,152 @@ def test_stop_aborts_verification() -> None:
     manager.stop()
 
 
+def test_scenario_resolves_lb_ip_and_points_action_url_at_it() -> None:
+    """Real-cluster path: manager resolves the Service LB IP and rewrites the URL.
+
+    The harness no longer relies on a port-forward to reach the workload — it
+    reads ``status.loadBalancer.ingress[0].ip`` from the target Service and
+    rewrites the action's ``target.service_url`` to ``http://<ip>:8080`` so the
+    fortio spike hits the LB directly. The skip flag is set on ``ctx.env`` so
+    the fault does not also open a redundant tunnel.
+    """
+    from devops_bench.chaos.faults.generate_load import (
+        _ENV_SKIP_PORT_FORWARD,
+        _ENV_TARGET_DEPLOYMENT,
+        _ENV_TARGET_NAMESPACE,
+    )
+
+    spec = _build_spec(verify_key=None)
+    captured: dict[str, Any] = {}
+
+    def fake_inject(self: GenerateLoadFault, ctx: RunContext, event):
+        captured["env"] = dict(ctx.env)
+        captured["service_url"] = self.target.service_url
+        return ChaosResult(success=True, injected_fault=self.type, elapsed_time=0.0)
+
+    fake_svc = {
+        "status": {"loadBalancer": {"ingress": [{"ip": "34.10.20.30"}]}}
+    }
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", fake_inject),
+        patch(
+            "devops_bench.evalharness.scenario.get_resource",
+            return_value=fake_svc,
+        ) as get_resource_mock,
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            skip_port_forward=False,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    # The Service was queried by deployment name in the right namespace.
+    get_resource_mock.assert_called_with("service", "dep", namespace="ns")
+    # The action's URL was rewritten to the LB endpoint, port 8080.
+    assert captured["service_url"] == "http://34.10.20.30:8080"
+    # Skip flag is set so the fault doesn't also open a port-forward.
+    assert captured["env"][_ENV_SKIP_PORT_FORWARD] == "1"
+    # Deployment / namespace are still threaded for the fallback path.
+    assert captured["env"][_ENV_TARGET_DEPLOYMENT] == "dep"
+    assert captured["env"][_ENV_TARGET_NAMESPACE] == "ns"
+
+
+def test_scenario_falls_back_to_port_forward_when_lb_ip_unavailable() -> None:
+    """When LB resolution times out, the manager leaves the skip flag unset.
+
+    The fault then opens its own ``kubectl port-forward`` to the target
+    deployment as the fallback transport — a degraded but functional path so
+    the run still attempts load.
+    """
+    from devops_bench.chaos.faults.generate_load import _ENV_SKIP_PORT_FORWARD
+
+    spec = _build_spec(verify_key=None)
+    captured: dict[str, Any] = {}
+
+    def fake_inject(self: GenerateLoadFault, ctx: RunContext, event):
+        captured["env"] = dict(ctx.env)
+        captured["service_url"] = self.target.service_url
+        return ChaosResult(success=True, injected_fault=self.type, elapsed_time=0.0)
+
+    # Service has no LB ingress assigned yet — every poll returns "not ready",
+    # and the bounded poll eventually gives up.
+    no_ip_svc = {"status": {"loadBalancer": {}}}
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", fake_inject),
+        patch(
+            "devops_bench.evalharness.scenario.get_resource",
+            return_value=no_ip_svc,
+        ),
+        # Make poll_until short-circuit to a single failed check so the test
+        # doesn't actually wait 180s on the wall clock.
+        patch(
+            "devops_bench.evalharness.scenario.poll_until",
+            return_value=False,
+        ) as poll_mock,
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            skip_port_forward=False,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    poll_mock.assert_called_once()
+    # The action URL is untouched (no IP to rewrite to).
+    assert captured["service_url"] == "http://example.svc.cluster.local"
+    # And critically the skip flag is NOT set — the fault falls back to its
+    # port-forward to keep the run functional.
+    assert _ENV_SKIP_PORT_FORWARD not in captured["env"]
+
+
+def test_scenario_skips_lb_resolution_in_smoke_path() -> None:
+    """``skip_port_forward=True`` (smoke) never queries the cluster for an LB IP.
+
+    The smoke harness runs against NoOpDeployer with no real cluster, so
+    asking kubectl for a Service would either fail or accidentally hit the
+    operator's current context. The skip flag short-circuits both the
+    resolution and the port-forward.
+    """
+    from devops_bench.chaos.faults.generate_load import _ENV_SKIP_PORT_FORWARD
+
+    spec = _build_spec(verify_key=None)
+    captured: dict[str, Any] = {}
+
+    def fake_inject(self: GenerateLoadFault, ctx: RunContext, event):
+        captured["env"] = dict(ctx.env)
+        captured["service_url"] = self.target.service_url
+        return ChaosResult(success=True, injected_fault=self.type, elapsed_time=0.0)
+
+    with (
+        patch.object(TimeTrigger, "wait", lambda self, ctx: None),
+        patch.object(GenerateLoadFault, "inject", fake_inject),
+        patch(
+            "devops_bench.evalharness.scenario.get_resource",
+            side_effect=AssertionError("smoke path must not query the cluster"),
+        ),
+        patch(
+            "devops_bench.evalharness.scenario.poll_until",
+            side_effect=AssertionError("smoke path must not poll"),
+        ),
+    ):
+        manager = ScenarioManager(
+            target_deployment="dep",
+            namespace="ns",
+            skip_port_forward=True,
+        )
+        manager.run_chaos_and_verification(spec, _build_ctx())
+
+    # Skip flag set, URL untouched, no kubectl / poll happened (the patches
+    # would have raised AssertionError otherwise).
+    assert captured["env"][_ENV_SKIP_PORT_FORWARD] == "1"
+    assert captured["service_url"] == "http://example.svc.cluster.local"
+
+
 @pytest.fixture(autouse=True)
 def _no_real_kubectl(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guard against this file accidentally shelling out to ``kubectl``.

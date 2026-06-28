@@ -14,9 +14,10 @@
 
 """Background chaos + verification on a daemon thread.
 
-Connectivity is owned by the fault: the :class:`ScenarioManager` threads the
-port-forward target env onto the run context and runs chaos plus verification
-on a daemon thread, resolving :attr:`ChaosSpec.verify` against a name-keyed
+The :class:`ScenarioManager` resolves the target Service's external
+LoadBalancer IP, points the load action at it, threads the port-forward target
+env onto the run context as a fallback, and runs chaos plus verification on a
+daemon thread, resolving :attr:`ChaosSpec.verify` against a name-keyed
 verification mapping supplied by the caller.
 """
 
@@ -34,9 +35,11 @@ from devops_bench.chaos.faults.generate_load import (
     _ENV_SKIP_PORT_FORWARD,
     _ENV_TARGET_DEPLOYMENT,
     _ENV_TARGET_NAMESPACE,
+    _LOCAL_PORT,
 )
 from devops_bench.core import get_logger
 from devops_bench.core.context import RunContext
+from devops_bench.k8s import get_resource, poll_until
 from devops_bench.verification import VerifierAgent
 
 __all__ = ["ScenarioManager", "VERIFICATION_TIMEOUT_SEC", "pick_free_port"]
@@ -45,6 +48,12 @@ _log = get_logger("evalharness.scenario")
 
 # Verification budget shared across the (possibly nested) checks.
 VERIFICATION_TIMEOUT_SEC = 120
+
+# Seconds to wait for the target Service's external LoadBalancer IP to be
+# assigned by GKE. LB provisioning typically completes within a minute but can
+# lag — bound it so a stuck assignment falls back to the port-forward path
+# instead of stalling the run.
+_LB_IP_TIMEOUT_SEC = 180
 
 
 def pick_free_port() -> int:
@@ -72,23 +81,30 @@ class ScenarioManager:
     the planned disruption, then resolves the spec's ``verify:`` key against the
     per-task verification mapping and runs
     :meth:`~devops_bench.verification.VerifierAgent.wait_for_condition` on the
-    resolved node. The ``kubectl port-forward`` the load fault needs to reach
-    its target is owned by the fault, not the manager — the manager only threads
-    the target deployment / namespace onto ``ctx.env`` so the fault can open it.
+    resolved node. The load fault reaches its target through the target
+    Service's external LoadBalancer IP — the manager resolves it from the
+    Service status and rewrites the action's load URL before injection — so the
+    fortio spike works from any runner location (in-VPC bastion or off-VPC
+    local). The ``kubectl port-forward`` the fault still owns is kept as a
+    fallback for when LB resolution fails or the caller opts out.
 
     Args:
-        target_deployment: Deployment the load fault should port-forward and
-            disrupt; threaded onto ``ctx.env`` for the fault.
-        namespace: Namespace the deployment lives in; threaded onto ``ctx.env``.
+        target_deployment: Deployment the load fault should disrupt. Also the
+            Service name (the optimize-scale stack seeds the Service with the
+            same name), used here to look up the external LB IP and threaded
+            onto ``ctx.env`` for the fault's port-forward fallback.
+        namespace: Namespace the deployment / Service lives in; threaded onto
+            ``ctx.env``.
         verification_mapping: Name-keyed mapping of verification specs the
             chaos ``verify:`` reference is resolved against. The mapping carries
             already-validated :class:`VerificationSpec` instances (or any value
             ``VerifierAgent.wait_for_condition`` accepts); the manager never
             re-validates. Empty mapping disables verification lookups.
-        skip_port_forward: When True, the fault runs without opening a
-            ``kubectl port-forward``. The E2E smoke harness (against
-            :class:`~devops_bench.deployers.NoOpDeployer`) flips this on so
-            tests can exercise the wiring without a real cluster.
+        skip_port_forward: When True, the fault runs without resolving an LB IP
+            and without opening a ``kubectl port-forward``. The E2E smoke
+            harness (against :class:`~devops_bench.deployers.NoOpDeployer`)
+            flips this on so tests can exercise the wiring without a real
+            cluster.
 
     Attributes:
         chaos_active_event: Set by the chaos fault once the disruption is
@@ -199,8 +215,14 @@ class ScenarioManager:
         The trigger is a typed node; wait through its own ``wait(ctx)`` rather
         than reading raw ``delay_seconds`` here — the harness only knows the
         ``Trigger`` Protocol, not the concrete trigger's parameters. Before
-        injecting, the port-forward target the load fault needs is threaded onto
-        ``ctx.env``; the fault opens and tears down its own tunnel.
+        injecting, the manager resolves the target Service's external
+        LoadBalancer IP and points the action's load URL at
+        ``http://<lb-ip>:8080`` (so the fortio spike hits the workload directly
+        from any runner location); the port-forward target is also threaded onto
+        ``ctx.env`` as a fallback for when LB resolution fails. When
+        ``skip_port_forward`` is True (E2E smoke / no real cluster), the LB
+        resolution is skipped and the fault runs against whatever URL the
+        action already carries.
 
         Args:
             spec: Typed chaos spec.
@@ -211,17 +233,100 @@ class ScenarioManager:
         """
         spec.trigger.wait(ctx)
 
-        # Thread the port-forward target onto the context so the fault can open
-        # its own tunnel. ``ctx.env`` values are strings; the skip flag is set
-        # only when truthy so the fault's ``bool(env.get(...))`` reads cleanly.
+        # Thread the port-forward target onto the context. ``ctx.env`` values
+        # are strings; flags are written only when truthy so the fault's
+        # ``bool(env.get(...))`` reads cleanly.
         ctx.env[_ENV_TARGET_DEPLOYMENT] = self.target_deployment
         ctx.env[_ENV_TARGET_NAMESPACE] = self.namespace
-        if self.skip_port_forward:
-            ctx.env[_ENV_SKIP_PORT_FORWARD] = "1"
         if self.local_port is not None:
             ctx.env[_ENV_LOCAL_PORT] = str(self.local_port)
 
+        if self.skip_port_forward:
+            # Smoke / no-cluster path: there is no cluster to query for an LB
+            # IP, so leave the action's URL alone and just flag the fault to
+            # skip the tunnel.
+            ctx.env[_ENV_SKIP_PORT_FORWARD] = "1"
+        else:
+            # Real-cluster path: resolve the external LB IP and rewrite the
+            # action's load URL to point at it directly. Fall back to the
+            # port-forward path if resolution fails or times out — that way a
+            # delayed LB still produces a load attempt instead of an aborted
+            # run.
+            lb_ip = self._resolve_lb_ip(self.target_deployment, self.namespace)
+            if lb_ip is not None and hasattr(spec.action, "target"):
+                target = spec.action.target
+                if hasattr(target, "service_url"):
+                    lb_url = f"http://{lb_ip}:{_LOCAL_PORT}"
+                    _log.info(
+                        "chaos load will hit external LB %s (no port-forward)",
+                        lb_url,
+                    )
+                    target.service_url = lb_url
+                    ctx.env[_ENV_SKIP_PORT_FORWARD] = "1"
+            # If lb_ip is None (timeout / kubectl error) the skip env is left
+            # unset; the fault then opens its own port-forward as the fallback.
+
         return spec.action.inject(ctx, self.chaos_active_event)
+
+    @staticmethod
+    def _resolve_lb_ip(service: str, namespace: str) -> str | None:
+        """Poll the target Service for an external LoadBalancer IP.
+
+        Reads ``status.loadBalancer.ingress[0].ip`` (falling back to
+        ``hostname`` when the cloud provider hands back a DNS name instead of an
+        IP) and waits up to :data:`_LB_IP_TIMEOUT_SEC` for it to appear, since
+        GKE may take a minute or two to provision the underlying network LB
+        and firewall rule.
+
+        Args:
+            service: Service name (the optimize-scale target Service is named
+                after the target deployment, so the manager reuses
+                ``target_deployment`` here).
+            namespace: Namespace the Service lives in.
+
+        Returns:
+            The external IP/hostname as a string, or ``None`` if the timeout
+            elapses or kubectl fails. The caller treats ``None`` as a signal to
+            fall back to the port-forward transport.
+        """
+        resolved: dict[str, str] = {}
+
+        def _has_ip() -> bool:
+            try:
+                doc = get_resource("service", service, namespace=namespace)
+            except Exception as exc:  # noqa: BLE001 - poll keeps retrying
+                _log.debug("waiting for LB IP on %s/%s: %s", namespace, service, exc)
+                return False
+            ingress = (
+                (doc.get("status") or {}).get("loadBalancer", {}).get("ingress")
+                or []
+            )
+            if not ingress:
+                return False
+            entry = ingress[0] or {}
+            ip = entry.get("ip") or entry.get("hostname")
+            if not ip:
+                return False
+            resolved["ip"] = ip
+            return True
+
+        _log.info(
+            "resolving external LB IP for service %s/%s (timeout %ss)",
+            namespace,
+            service,
+            _LB_IP_TIMEOUT_SEC,
+        )
+        ok = poll_until(_has_ip, timeout_sec=_LB_IP_TIMEOUT_SEC)
+        if not ok:
+            _log.warning(
+                "external LB IP for service %s/%s not assigned within %ss; "
+                "falling back to port-forward",
+                namespace,
+                service,
+                _LB_IP_TIMEOUT_SEC,
+            )
+            return None
+        return resolved["ip"]
 
     @staticmethod
     def _chaos_report_from_result(spec: ChaosSpec, result: Any) -> dict[str, Any]:

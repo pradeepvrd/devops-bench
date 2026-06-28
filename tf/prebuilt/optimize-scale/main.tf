@@ -140,8 +140,18 @@ resource "kubernetes_service_v1" "target" {
       target_port = 8080
     }
 
-    type = "ClusterIP"
+    # External LoadBalancer so the chaos load fault can reach the workload from
+    # any runner (in-VPC bastion or off-VPC local) without a port-forward, which
+    # drops connections under sustained 300 qps. GKE auto-provisions a network
+    # LB with an external IP and an ALLOW firewall rule on the default VPC; the
+    # harness resolves status.loadBalancer.ingress[0].ip and points the load at
+    # http://<ip>:8080 directly.
+    type = "LoadBalancer"
   }
+
+  # Wait for the LB IP to be assigned before terraform returns, so the harness
+  # can resolve the external IP immediately after apply.
+  wait_for_load_balancer = true
 }
 
 output "cluster_name" {

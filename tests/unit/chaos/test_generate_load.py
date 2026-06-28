@@ -201,6 +201,9 @@ def test_inject_opens_port_forward_and_points_url_at_local_tunnel():
     with (
         patch.object(k8s_kubectl.subprocess, "Popen", return_value=proc) as popen_mock,
         patch.object(k8s_kubectl.time, "sleep"),  # don't actually sleep the settle window
+        # The fault waits for the target rollout before forwarding; stub it so
+        # this test isolates the port-forward behavior.
+        patch("devops_bench.chaos.faults.generate_load.rollout_status"),
         patch("devops_bench.chaos.agent.ChaosAgent", _StubAgent),
     ):
         result = fault.inject(ctx)
