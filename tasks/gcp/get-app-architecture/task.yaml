@@ -2,11 +2,12 @@ task_id: 1
 name: "get-app-architecture"
 infrastructure:
   deployer: "tofu"
-  stack: "prebuilt/minimum"
+  stack: "prebuilt/hypercomputer-d1"
   teardown: true
   variables:
+    seed_mode: "full"
     node_count: 3
-    machine_type: "e2-standard-2"
+    machine_type: "e2-standard-4"
 prompt: "summarize the hypercomputer d1 app in project {{GCP_PROJECT_ID}}"
 expected_output: |
   critical requirements:

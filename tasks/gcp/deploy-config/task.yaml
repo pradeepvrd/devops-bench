@@ -2,11 +2,16 @@ task_id: 3
 name: "deploy-config"
 infrastructure:
   deployer: "tofu"
-  stack: "prebuilt/minimum"
+  # Provides the cluster + the hypercomputer-d1-vllm-sa KSA (Workload Identity)
+  # + the hypercomputer-d1-models-* GCS bucket the manifest's gcsfuse volume
+  # references. seed_mode=infra-only deliberately does NOT pre-deploy the vllm
+  # workloads — applying them is this task's agent's job.
+  stack: "prebuilt/hypercomputer-d1"
   teardown: true
   variables:
+    seed_mode: "infra-only"
     node_count: 3
-    machine_type: "e2-standard-2"
+    machine_type: "e2-standard-4"
 prompt: |
   Deploy the provided manifests to cluster {{GKE_CLUSTER_NAME}} in project {{GCP_PROJECT_ID}}.
 
