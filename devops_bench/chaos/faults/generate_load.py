@@ -41,7 +41,7 @@ from devops_bench.chaos.base import FAULTS, ChaosResult, Fault
 from devops_bench.core import get_logger
 from devops_bench.core.context import RunContext
 from devops_bench.core.subprocess import run
-from devops_bench.k8s import port_forward
+from devops_bench.k8s import port_forward, rollout_status
 
 __all__ = [
     "GenerateLoadFault",
@@ -78,14 +78,22 @@ _ENV_SKIP_PORT_FORWARD = "CHAOS_SKIP_PORT_FORWARD"
 # fault binds the port-forward's local side here and points the load URL at it.
 _ENV_LOCAL_PORT = "CHAOS_LOCAL_PORT"
 
+# Seconds to wait for the target deployment's rollout to finish before opening
+# the port-forward. The agent often mutates the deployment (e.g. adds resource
+# limits) just before the spike, triggering a rolling update; without this wait
+# the port-forward can race a not-yet-Ready pod and exit early (code 1).
+_TARGET_READY_TIMEOUT_SEC = 120
+
 
 def build_system_instruction(target_url: str = _DEFAULT_TARGET_URL) -> str:
     """Build the SRE system instruction, targeting ``target_url`` for load.
 
     Args:
         target_url: URL fortio load should be directed at. Flows from the
-            fault's ``target.service_url`` (rewritten by the harness to the
-            local port-forward), defaulting to :data:`_DEFAULT_TARGET_URL`.
+            fault's ``target.service_url`` — the harness rewrites this to the
+            target Service's external LoadBalancer URL on a real cluster, or to
+            a local port-forward URL as the fallback; defaults to
+            :data:`_DEFAULT_TARGET_URL`.
 
     Returns:
         The system instruction string with the target URL injected.
@@ -104,7 +112,7 @@ def build_system_instruction(target_url: str = _DEFAULT_TARGET_URL) -> str:
         Strict Guidelines for Execution:
         - Single Execution Policy: You MUST execute exactly one tool call to run the planned 'fortio' load generation spike. Do NOT attempt to rerun, adjust, or tune the load generation if the target service saturates or returns timeouts. Once the single load command is executed, analyze the output, write your final performance summary, and exit immediately.
         - Safety First: Only inject transient, safe, and recoverable faults (e.g. killing pods, scaling deployments, generating traffic spikes). Do NOT permanently destroy GKE clusters, namespaces, or nodes.
-        - Traffic Generation: For load spikes, use the 'fortio' binary. Since GKE internal service URLs (*.svc.cluster.local) are port-forwarded to the host, you MUST target '{target_url}' instead.
+        - Traffic Generation: For load spikes, use the 'fortio' binary. Target '{target_url}' directly — this is the workload's reachable URL (an external LoadBalancer or a local tunnel, depending on the runner). Do NOT use *.svc.cluster.local URLs from outside the cluster.
         - Analysis & Clarity: Analyze command outputs carefully, report stdout/stderr accurately, and confirm in your final response when the disruption has been successfully completed."""
     )
 
@@ -241,7 +249,7 @@ class GenerateLoadFault(Fault):
 
             Guidelines for execution:
             1. Use the 'fortio' tool to inject traffic into GKE.
-            2. Note: GKE service target URLs (like *.svc.cluster.local) are port-forwarded to '{target_url}' on the host, so run fortio against {target_url} instead.
+            2. Run fortio against {target_url} directly — that is the workload's reachable URL for this run.
             Use your run_command tool to execute this disruption safely and effectively."""
         )
         return template.format(spec_json=spec_json, target_url=target_url)
@@ -287,6 +295,23 @@ class GenerateLoadFault(Fault):
         # Open the fault's own tunnel only when a target deployment is named and
         # the caller did not opt out; otherwise run against the existing URL.
         if deployment and not skip_port_forward:
+            # Wait for the deployment to be rolled out (a Ready pod exists)
+            # before forwarding, so the port-forward does not race a rolling
+            # update the agent may have just triggered. Best-effort: a failure
+            # here (e.g. no such deployment) should not abort the fault — the
+            # port-forward attempt below surfaces the real problem.
+            try:
+                rollout_status(
+                    f"deployment/{deployment}",
+                    timeout_sec=_TARGET_READY_TIMEOUT_SEC,
+                    namespace=namespace,
+                )
+            except Exception as exc:  # noqa: BLE001 - wait is best-effort
+                _log.warning(
+                    "rollout wait for deployment/%s did not complete: %s",
+                    deployment,
+                    exc,
+                )
             forward = port_forward(
                 f"deployment/{deployment}",
                 local_port,
