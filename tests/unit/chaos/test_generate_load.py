@@ -45,6 +45,25 @@ def _make_ctx(env: dict[str, str] | None = None) -> RunContext:
     return RunContext(task_id="test", env=env or {})
 
 
+def _drive_load(
+    kwargs: dict,
+    *,
+    returncode: int = 0,
+    command: str = "fortio load -qps 50 http://localhost:8080",
+) -> None:
+    """Simulate a fortio spike by invoking the agent's bound tool handler.
+
+    The fault now fails closed unless a ``fortio load`` command actually ran and
+    exited 0, so a stub agent must drive the handler the same way the real loop
+    would. ``gl.run`` is patched to a fake completion with ``returncode``.
+    """
+    handler = kwargs["tool_handler"]
+    event = kwargs.get("chaos_active_event")
+    fake = CompletedProcess(args=["fortio"], returncode=returncode, stdout="OUT", stderr="ERR")
+    with patch.object(gl, "run", return_value=fake):
+        handler(command, event)
+
+
 def test_build_system_instruction_embeds_target_url():
     msg = build_system_instruction("http://localhost:9999")
     assert "http://localhost:9999" in msg
@@ -97,6 +116,7 @@ def test_inject_returns_chaos_result_on_success():
 
         def run(self, goal: str) -> str:
             assert "http://localhost:8080" in goal  # goal carries the rewritten URL
+            _drive_load(self.kwargs)  # a real spike that exits 0
             return "spike complete"
 
     # ``ChaosAgent`` is imported lazily inside ``inject`` (Phase 4 keeps the
@@ -111,6 +131,45 @@ def test_inject_returns_chaos_result_on_success():
     assert result.output == "spike complete"
     assert result.elapsed_time >= 0.0
     assert result.error is None
+
+
+def test_inject_fails_closed_when_no_load_command_ran():
+    """A clean agent loop that never issued a ``fortio load`` is a failure."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x", qps=1))
+
+    class _IdleAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, goal: str) -> str:
+            return "I decided not to run any load"
+
+    with patch("devops_bench.chaos.agent.ChaosAgent", _IdleAgent):
+        result = fault.inject(_make_ctx())
+
+    assert result.success is False
+    assert result.error is not None
+    assert "no fortio load command" in result.error
+
+
+def test_inject_fails_closed_when_load_exits_nonzero():
+    """A fortio spike that could not reach the workload (exit != 0) fails closed."""
+    fault = GenerateLoadFault(target=LoadTarget(service_url="http://x", qps=1))
+
+    class _FailingLoadAgent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def run(self, goal: str) -> str:
+            _drive_load(self.kwargs, returncode=1)  # connection refused, etc.
+            return "spike attempted"
+
+    with patch("devops_bench.chaos.agent.ChaosAgent", _FailingLoadAgent):
+        result = fault.inject(_make_ctx())
+
+    assert result.success is False
+    assert result.error is not None
+    assert "did not reach the workload" in result.error
 
 
 def test_inject_converts_agent_failure_to_failed_chaos_result():
@@ -150,7 +209,14 @@ def test_inject_threads_chaos_active_event_through_to_agent():
 
     assert captured["chaos_active_event"] is event
     assert captured["tool"] is gl.RUN_COMMAND_TOOL
-    assert captured["tool_handler"] is gl.run_chaos_command
+    # The handler is a thin wrapper binding the per-injection load_result; it
+    # still delegates to run_chaos_command (sets the event, returns the output).
+    handler = captured["tool_handler"]
+    fake = CompletedProcess(args=["fortio"], returncode=0, stdout="OUT", stderr="ERR")
+    with patch.object(gl, "run", return_value=fake):
+        out = handler("fortio load http://x", event)
+    assert "Stdout:\nOUT" in out
+    assert event.is_set()
     # The system instruction targets the rewritten URL from the spec.
     assert "http://x" in captured["system_instruction"]
 
@@ -189,10 +255,12 @@ def test_inject_opens_port_forward_and_points_url_at_local_tunnel():
     class _StubAgent:
         def __init__(self, **kwargs):
             captured["system_instruction"] = kwargs["system_instruction"]
+            self.kwargs = kwargs
 
         def run(self, goal: str) -> str:
             captured["goal"] = goal
             captured["url_during_run"] = fault.target.service_url
+            _drive_load(self.kwargs)
             return "spike complete"
 
     ctx = _make_ctx(
@@ -303,9 +371,11 @@ def test_inject_skips_port_forward_when_flagged():
     class _StubAgent:
         def __init__(self, **kwargs):
             captured["system_instruction"] = kwargs["system_instruction"]
+            self.kwargs = kwargs
 
         def run(self, goal: str) -> str:
             captured["url_during_run"] = fault.target.service_url
+            _drive_load(self.kwargs, command="fortio load http://existing")
             return "ok"
 
     ctx = _make_ctx(
@@ -334,10 +404,11 @@ def test_inject_without_target_deployment_runs_against_existing_url():
 
     class _StubAgent:
         def __init__(self, **kwargs):
-            pass
+            self.kwargs = kwargs
 
         def run(self, goal: str) -> str:
             captured["url_during_run"] = fault.target.service_url
+            _drive_load(self.kwargs, command="fortio load http://plain")
             return "ok"
 
     with (

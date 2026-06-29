@@ -141,6 +141,8 @@ RUN_COMMAND_TOOL = SimpleNamespace(
 def run_chaos_command(
     command: str,
     chaos_active_event: threading.Event | None = None,
+    *,
+    load_result: dict[str, Any] | None = None,
 ) -> str:
     """Execute a single chaos command and return its combined output.
 
@@ -154,6 +156,12 @@ def run_chaos_command(
     Args:
         command: Single command to execute (no shell pipelines or redirection).
         chaos_active_event: Optional event signaled when a load spike starts.
+        load_result: Optional mutable dict the caller reads to learn whether the
+            load spike actually ran and exited 0. When the command is a load
+            spike (:data:`_LOAD_MARKER`), the keys ``attempted`` (bool),
+            ``returncode`` (int), and ``ok`` (bool) are written. Lets the fault
+            fail closed instead of reporting success for a spike that never
+            reached the workload.
 
     Returns:
         A string combining stdout and stderr, or an ``"Error: ..."`` string if
@@ -162,6 +170,7 @@ def run_chaos_command(
     if not command.strip():
         return "Error: command string is empty"
 
+    is_load = _LOAD_MARKER in command
     try:
         _log.info("running chaos command: %s", command)
 
@@ -174,13 +183,24 @@ def run_chaos_command(
         # Signal "load active" only once the command parses cleanly and we are
         # about to execute it, so a parse failure never falsely tells the
         # harness that load is live.
-        if chaos_active_event is not None and _LOAD_MARKER in command:
+        if chaos_active_event is not None and is_load:
             _log.info("load spike detected; signaling harness via chaos event")
             chaos_active_event.set()
 
         completed = run(argv, check=False, timeout=_COMMAND_TIMEOUT)
+        if is_load and load_result is not None:
+            # Record the spike's real exit status so the fault can fail closed:
+            # a non-zero fortio exit means it could not reach the workload.
+            load_result["attempted"] = True
+            load_result["returncode"] = completed.returncode
+            load_result["ok"] = completed.returncode == 0
         return f"Stdout:\n{completed.stdout}\nStderr:\n{completed.stderr}"
     except Exception as exc:  # noqa: BLE001 - surface any failure back to the LLM
+        if is_load and load_result is not None:
+            load_result["attempted"] = True
+            load_result["returncode"] = None
+            load_result["ok"] = False
+            load_result["error"] = f"{type(exc).__name__}: {exc}"
         return f"Error: {exc}"
 
 
@@ -323,9 +343,12 @@ class GenerateLoadFault(Fault):
             forward = contextlib.nullcontext()
             local_url = None
 
+        # Populated by ``run_chaos_command`` with the spike's real exit status so
+        # the fault can fail closed when load never reached the workload.
+        load_result: dict[str, Any] = {}
         try:
             with forward:
-                output = self._run_agent_loop(local_url, chaos_active_event)
+                output = self._run_agent_loop(local_url, chaos_active_event, load_result)
         except Exception as exc:  # noqa: BLE001 - one fault must never abort the run
             elapsed = time.monotonic() - start
             _log.exception("generate_load fault crashed")
@@ -337,6 +360,28 @@ class GenerateLoadFault(Fault):
                 error=f"{type(exc).__name__}: {exc}",
             )
         elapsed = time.monotonic() - start
+
+        # Fail closed: a clean agent loop does not mean the spike landed. Treat
+        # "no fortio load ran" and "fortio exited non-zero" (could not reach the
+        # workload) as failures so a no-op spike never passes as a measured one.
+        if not load_result.get("attempted"):
+            return ChaosResult(
+                success=False,
+                injected_fault=self.type,
+                output=output,
+                elapsed_time=elapsed,
+                error="no fortio load command was executed",
+            )
+        if not load_result.get("ok"):
+            rc = load_result.get("returncode")
+            detail = load_result.get("error") or f"fortio load exited with code {rc}"
+            return ChaosResult(
+                success=False,
+                injected_fault=self.type,
+                output=output,
+                elapsed_time=elapsed,
+                error=f"load did not reach the workload: {detail}",
+            )
         return ChaosResult(
             success=True,
             injected_fault=self.type,
@@ -348,6 +393,7 @@ class GenerateLoadFault(Fault):
         self,
         local_url: str | None,
         chaos_active_event: threading.Event | None,
+        load_result: dict[str, Any],
     ) -> str:
         """Drive the chaos agent against the effective target URL.
 
@@ -362,6 +408,8 @@ class GenerateLoadFault(Fault):
             local_url: Local port-forward URL to target, or ``None`` to use the
                 target's own ``service_url``.
             chaos_active_event: Optional event signaled when load goes active.
+            load_result: Mutable dict the tool handler records the spike's exit
+                status into, so the caller can fail closed.
 
         Returns:
             The agent's final summary string.
@@ -369,6 +417,12 @@ class GenerateLoadFault(Fault):
         # Lazy import keeps the agent + models chain out of sys.modules until a
         # fault actually injects; registering the fault only needs the class.
         from devops_bench.chaos.agent import ChaosAgent
+
+        # Bind ``load_result`` into the handler so each tool call records the
+        # spike's exit status without changing the ``(command, event)`` handler
+        # signature the agent invokes.
+        def tool_handler(command: str, event: threading.Event | None) -> str:
+            return run_chaos_command(command, event, load_result=load_result)
 
         original_url = self.target.service_url
         if local_url is not None:
@@ -378,7 +432,7 @@ class GenerateLoadFault(Fault):
             agent = ChaosAgent(
                 system_instruction=system_instruction,
                 tool=RUN_COMMAND_TOOL,
-                tool_handler=run_chaos_command,
+                tool_handler=tool_handler,
                 chaos_active_event=chaos_active_event,
             )
             return agent.run(self.goal())
