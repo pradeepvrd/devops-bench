@@ -74,43 +74,18 @@ Restructure `gke-labs` before pushing any code upstream. No upstream PRs should 
 
 ## 4. Phase 2: Migrate module by module
 
-Follow the 5-stage order defined in [pr-plan.md](./pr-plan.md).
+Follow the wave plan in [pr-plan.md](./pr-plan.md) §3.2 — it fixes which PR is next, its owner, and its exact paths.
 
 ### Step 2.1: Export a module (Flow A)
 
-For each module (e.g., `gemini` CLI agent):
+Per-PR export is driven by the **`migration-prep` skill** ([SKILL.md](../../.agents/skills/migration-prep/SKILL.md)): it picks the next ready PR (reconciling the wave plan, the `migrated.bara.sky` frontier, and upstream merged/in-flight state), scopes a branch off `upstream/main` with `prep-export.sh`, carries along any dependency delta a later module needs, gates it green (`uv sync` + `ruff` + `pytest`), and opens the upstream PR. It **prepares only** — it never merges or flips the frontier.
 
-#### Remote Setup Strategy
-
-Before executing Flow A, ensure your local repository is set up with three distinct remotes:
-- `origin`: Points to your personal GitHub fork (e.g., `https://github.com/YOUR_USERNAME/devops-bench.git`).
-- `gkelabs`: Points to the source incubator repository (`https://github.com/gke-labs/devops-bench.git`).
-- `upstream`: Points to the canonical target repository (`https://github.com/kubernetes-sigs/devops-bench.git`).
-
-If you cloned directly from `gke-labs`, rename the default `origin` remote first:
+One-time before your first export: complete the [prerequisites](#2-maintainer-prerequisites) and, in your fork clone, point `origin` at your fork and add the other two remotes:
 ```bash
-git remote rename origin gkelabs
-git remote add origin https://github.com/YOUR_USERNAME/devops-bench.git
+git remote add gkelabs  https://github.com/gke-labs/devops-bench.git
 git remote add upstream https://github.com/kubernetes-sigs/devops-bench.git
 ```
-
-1. Set up remote endpoints in your local clone:
-   ```bash
-   git remote add gkelabs  https://github.com/gke-labs/devops-bench.git
-   git remote add upstream https://github.com/kubernetes-sigs/devops-bench.git
-   ```
-2. Run `prep-export.sh` to compile a clean, scoped branch containing only the desired files and their unit tests, branched directly off `upstream/main`:
-   ```bash
-   ./hack/prep-export.sh \
-     --branch add-gemini-agent \
-     --paths "devops_bench/agents/cli/gemini.py tests/test_factory.py"
-   ```
-3. Push the branch to your fork and submit an upstream Pull Request:
-   ```bash
-   git push origin add-gemini-agent
-   gh pr create --repo kubernetes-sigs/devops-bench --base main --fill
-   ```
-4. Respond to upstream review comments and complete the merge into `kubernetes-sigs/devops-bench`.
+Then invoke the skill per module and respond to upstream review until it merges.
 
 ---
 
@@ -168,6 +143,15 @@ push/PR identity stable and allowlistable for the migration.
 The bot runs `.github/workflows/backsync.yml` daily via cron or on demand via `workflow_dispatch`,
 authenticating with `SYNC_BOT_TOKEN`.
 
+#### Scope: what actually syncs back
+Two things bound what the bot writes into `gke-labs`:
+- **Paths** — only the `MIGRATED` frontier (minus `NEVER_SYNC`). While the frontier is empty the run is a NO_OP; upstream code outside the frontier is **never** mirrored back, so pre-existing upstream files don't land in `gke-labs`.
+- **History** — Copybara `ITERATIVE` replays upstream commits *after* the last synced revision. **Seed the baseline on the first run** so only new commits flow; otherwise it replays a path's full upstream history (including pre-migration commits):
+  ```bash
+  ./hack/backsync.sh --last-rev "$(git ls-remote https://github.com/kubernetes-sigs/devops-bench.git main | cut -f1)"
+  ```
+  After the seed, later runs pick the baseline up automatically from the bot's own PRs.
+
 #### Running locally or debugging
 ```bash
 # Real run (push/PR as the bot): use the bot's PAT
@@ -186,15 +170,6 @@ as the original upstream contributors (see the CLA note below).
 
 ---
 
-### Step 2.4: Leverage `suggest-flips` automation
-
-To reduce manual tracking, the **`suggest-flips`** automated workflow (`.github/workflows/suggest-flips.yml`) runs weekly or on-demand:
-1. It compares local paths against what currently exists on `upstream/main`.
-2. It automatically uncomments any paths in `migrated.bara.sky` that have successfully landed upstream.
-3. It opens a Pull Request in `gke-labs` with the suggested flips for maintainer review.
-
----
-
 ## 5. Phase 3: Archive and retire `gke-labs`
 
 When `migrated.bara.sky` includes 100% of paths:
@@ -205,39 +180,22 @@ When `migrated.bara.sky` includes 100% of paths:
 
 ---
 
-## 6. Toolkit installation locations
+## 6. Toolkit locations
 
-Most files in `docs/migration/` are **inert templates**: GitHub Actions only runs workflows under
-`.github/workflows/`, and Copybara plus the `hack/` scripts resolve `copy.bara.sky` and
-`migrated.bara.sky` from the repo root. To activate, each must be copied to the destination below. The
-active copies are kept **byte-identical** to these templates (so they can be diffed); the templates
-remain the source for the eventual `kubernetes-sigs` install.
+The toolkit is installed at its active locations in `gke-labs` (only `README.md`, `pr-plan.md`, and `legacy-comparison.md` remain under `docs/migration/`). The back-sync workflows are inert until the bot is configured (§2.3): they carry a `github.repository == 'gke-labs/devops-bench'` guard and no-op on the empty frontier. To install upstream, copy each file from its `gke-labs` location.
 
-**Initially, only the CI guardrail is installed in `gke-labs`** (see the note below). Every row
-marked ⛔ is still an inert template that **must still be installed** in a later step.
+| Location | Host | Purpose |
+|---|---|---|
+| `.github/workflows/guardrails.yml` | both | CI: `uv sync`, ruff, unit tests |
+| `hack/check-migrated-readonly.sh` | gke-labs | flip guard invoked by `guardrails.yml` |
+| `migrated.bara.sky` (root) | gke-labs | single source-of-truth frontier |
+| `copy.bara.sky` (root) | gke-labs | back-sync (Copybara) configuration |
+| `.github/workflows/backsync.yml` | gke-labs | back-sync pipeline (needs `SYNC_BOT_TOKEN`) |
+| `.github/workflows/suggest-flips.yml` | gke-labs | opens flip PRs (needs `SYNC_BOT_TOKEN`) |
+| `hack/prep-export.sh` | gke-labs | stage a scoped upstream export branch |
+| `hack/backsync.sh` | gke-labs | run Copybara locally or in CI |
+| `hack/migration-status.sh` | gke-labs | migration progress tracker |
 
-| Source File in `docs/migration/` | Active Target Destination | Host Repository | Status | Purpose |
-|---|---|---|---|---|
-| `workflows/guardrails.yml` | `.github/workflows/guardrails.yml` | **Both** | ✅ Installed in `gke-labs` (this PR); ⛔ TODO in `kubernetes-sigs` | CI testing, ruff lints, header checks |
-| `hack/check-migrated-readonly.sh` | `hack/check-migrated-readonly.sh` | `gke-labs` | ✅ Installed (this PR) — invoked by `guardrails.yml` | Blocks edits to migrated files |
-| `migrated.bara.sky` | `migrated.bara.sky` (Root) | `gke-labs` | ⛔ Not yet installed | Single source-of-truth frontier |
-| `copy.bara.sky` | `copy.bara.sky` (Root) | `gke-labs` | ⛔ Not yet installed | Back-sync bot configuration |
-| `workflows/backsync.yml` | `.github/workflows/backsync.yml` | `gke-labs` | ⛔ Not yet installed (needs `SYNC_BOT_TOKEN`) | Automated back-sync GHA pipeline |
-| `workflows/suggest-flips.yml` | `.github/workflows/suggest-flips.yml` | `gke-labs` | ⛔ Not yet installed | Suggests flips in `migrated.bara.sky` |
-| `hack/prep-export.sh` | `hack/prep-export.sh` | `gke-labs` | ⛔ Not yet installed | Pulls files and stages upstream branch |
-| `hack/backsync.sh` | `hack/backsync.sh` | `gke-labs` | ⛔ Not yet installed | Runs Copybara locally or via CI |
-| `hack/migration-status.sh` | `hack/migration-status.sh` | `gke-labs` | ⛔ Not yet installed | Migration progress CLI tracker |
-
-> [!IMPORTANT]
-> **`guardrails.yml` is live and active in `gke-labs`, but the rest of the toolkit is not; it still must be installed.**
-> - The workflow is a deliberate **green no-op until the Phase-1 toolchain lands**: its `detect` job
->   short-circuits the build/lint/test matrix until `pyproject.toml` + `devops_bench/` exist.
-> - Its `migrated-readonly` job (gke-labs only) shells out to `hack/check-migrated-readonly.sh`, so that
->   one script is installed alongside it. With no `migrated.bara.sky` at the root yet, the guard cleanly
->   no-ops ("nothing is locked yet"); installing `migrated.bara.sky` later *arms* it.
-> - **Still to do** (the ⛔ rows above): install `migrated.bara.sky` + `copy.bara.sky` at the root,
->   `backsync.yml` + `suggest-flips.yml` under `.github/workflows/`, and the remaining `hack/` scripts,
->   plus the one-time back-sync bot setup (`SYNC_BOT_TOKEN`, §2.3). These come online in Phase 2.
 
 ---
 
@@ -246,5 +204,5 @@ marked ⛔ is still an inert template that **must still be installed** in a late
 * **DO** complete Phase 1 restructure entirely before sending the first forward PR.
 * **DO** include unit tests in the same forward PR as the code files.
 * **DO** develop migrated files exclusively in `kubernetes-sigs` once they have been flipped.
-* **DON'T** edit a migrated path directly inside the `gke-labs` repo. The back-sync bot will automatically overwrite/revert your edits.
+* **DON'T** edit a migrated path directly inside the `gke-labs` repo. The back-sync bot will attempt overwrite/revert your edits.
 * **DON'T** let the back-sync bot sync manifests (`pyproject.toml`, `uv.lock`, `.python-version`, `LICENSE`). These are marked as `NEVER_SYNC` and are managed manually per-repo to prevent version skew and dependency conflicts.

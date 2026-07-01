@@ -24,6 +24,8 @@ permissions:
 
 jobs:
   backsync:
+    # gke-labs only: this bot mirrors upstream back into gke-labs. Never run it in a fork or upstream.
+    if: github.repository == 'gke-labs/devops-bench'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

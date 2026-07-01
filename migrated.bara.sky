@@ -1,0 +1,235 @@
+# migrated.bara.sky — the single source of truth for the migrated frontier.
+# Installs at the gke-labs repo root. Loaded by copy.bara.sky (the back-sync scope) and parsed by
+# hack/check-migrated-readonly.sh (flip guard) and hack/migration-status.sh (tracker), so there is
+# exactly one list. Add a path (uncomment a line) when its forward PR merges; remove it to un-migrate.
+#
+# Ordered by wave (pr-plan.md §3.2 code, §3.4 docs/skills). Entries are per-PR: one concrete plus
+# its co-located unit tests, matching the "smallest reviewable unit" rule (pr-plan.md §1.6). That
+# granularity is deliberate — suggest-flips uncomments a line as soon as its path exists upstream, so
+# a per-family glob would lock not-yet-migrated siblings early; a per-PR entry flips exactly when its
+# PR lands. Wave 1 (toolchain: pyproject.toml, uv.lock, .python-version, CI) is human-managed in both
+# repos and is intentionally NOT listed here.
+#
+# gke-labs-only tooling — the migration-prep skill, docs/migration/**, and the leaderboard assets
+# (site*/**, docs/how-to/leaderboard.md) — never migrates: it stays NEVER_SYNC and is not listed.
+# Each migrating skill's .claude/skills/<name> symlink travels with its .agents/skills/<name>/ content.
+#
+# See docs/migration/README.md and pr-plan.md. Empty until the first module lands.
+
+MIGRATED = [
+    # --- Wave 2: foundation (core/), imported everywhere ---
+    # "devops_bench/core/**",
+    # "tests/unit/core/**",
+
+    # --- Wave 3: leaves + bases (parallel) ---
+    # tasks contracts (schema, loader)
+    # "devops_bench/tasks/**",
+    # "tests/unit/tasks/**",
+    # judge skill guides (the packaged *.md the metrics judge reads)
+    # "devops_bench/skills/**",
+    # metrics registry base
+    # "devops_bench/metrics/base.py",
+    # "devops_bench/metrics/__init__.py",
+    # "tests/unit/metrics/test_metrics_base.py",
+    # "tests/unit/metrics/test_metrics_extension_axis.py",
+    # "tests/unit/metrics/test_package_import.py",
+    # models base + tool loop (run_tool_loop)
+    # "devops_bench/models/base.py",
+    # "devops_bench/models/utils/**",
+    # "devops_bench/models/__init__.py",
+    # "tests/unit/models/test_models_base.py",
+    # "tests/unit/models/test_loop.py",
+    # agents base + capabilities
+    # "devops_bench/agents/base.py",
+    # "devops_bench/agents/config.py",
+    # "devops_bench/agents/result.py",
+    # "devops_bench/agents/__init__.py",
+    # "devops_bench/agents/capabilities/**",
+    # "tests/unit/agents/test_agents_base.py",
+    # "tests/unit/agents/test_agents_config.py",
+    # "tests/unit/agents/test_agents_result.py",
+    # "tests/unit/agents/test_agents_capabilities.py",
+    # "tests/unit/agents/test_agents_capabilities_import_hygiene.py",
+    # "tests/unit/agents/test_agents_import_hygiene.py",
+    # "tests/unit/agents/test_agents_no_gke_strings.py",
+    # k8s wrappers (kubectl, conditions)
+    # "devops_bench/k8s/**",
+    # "tests/unit/k8s/**",
+    # cloud providers (base, gcp, kind)
+    # "devops_bench/providers/**",
+    # "tests/unit/providers/**",
+    # Terraform modules (tf/modules -> infra/modules)
+    # "infra/modules/**",
+    # result model (row, aggregate, normalize)
+    # "devops_bench/results/**",
+    # "tests/unit/results/**",
+
+    # --- Wave 4: components on the bases (parallel) ---
+    # models: provider clients
+    # "devops_bench/models/gemini.py",
+    # "tests/unit/models/test_models_gemini.py",
+    # "devops_bench/models/claude.py",
+    # "tests/unit/models/test_models_claude.py",
+    # "devops_bench/models/ollama.py",
+    # "tests/unit/models/test_models_ollama.py",
+    # gemini CLI agent
+    # "devops_bench/agents/cli/gemini_cli/**",
+    # "devops_bench/agents/cli/__init__.py",
+    # "tests/unit/agents/test_agents_cli_gemini.py",
+    # openclaw CLI agent
+    # "devops_bench/agents/cli/openclaw/**",
+    # "tests/unit/agents/test_agents_cli_openclaw.py",
+    # "tests/unit/agents/test_legacy_openclaw_tokens.py",
+    # agents shared (cli_capabilities, skills)
+    # "devops_bench/agents/shared/**",
+    # "tests/unit/agents/shared/**",
+    # MCP client
+    # "devops_bench/agents/api/mcp.py",
+    # "devops_bench/agents/api/__init__.py",
+    # "tests/unit/agents/api/test_agents_api_mcp.py",
+    # "tests/unit/agents/api/test_agents_api_import_hygiene.py",
+    # chaos base (replaces upstream agents/chaos/ — git rm the 3 superseded files in this PR)
+    # "devops_bench/chaos/base.py",
+    # "devops_bench/chaos/agent.py",
+    # "devops_bench/chaos/schema.py",
+    # "devops_bench/chaos/spec.py",
+    # "devops_bench/chaos/__init__.py",
+    # "tests/unit/chaos/test_base.py",
+    # "tests/unit/chaos/test_agent.py",
+    # "tests/unit/chaos/test_spec.py",
+    # "tests/unit/chaos/test_extension_axis.py",
+    # "tests/unit/chaos/test_package_import.py",
+    # verification base (base, spec, runner)
+    # "devops_bench/verification/base.py",
+    # "devops_bench/verification/spec.py",
+    # "devops_bench/verification/runner.py",
+    # "devops_bench/verification/__init__.py",
+    # "tests/unit/verification/test_base.py",
+    # "tests/unit/verification/test_spec.py",
+    # "tests/unit/verification/test_runner.py",
+    # "tests/unit/verification/test_verifier_registry.py",
+    # "tests/unit/verification/test_package_import.py",
+    # metrics judge (geval, pipeline, _skills)
+    # "devops_bench/metrics/geval.py",
+    # "devops_bench/metrics/pipeline.py",
+    # "devops_bench/metrics/_skills.py",
+    # "tests/unit/metrics/test_metrics_geval.py",
+    # "tests/unit/metrics/test_metrics_pipeline.py",
+    # "tests/unit/metrics/test_metrics_skills.py",
+    # deployers base (base, factory)
+    # "devops_bench/deployers/base.py",
+    # "devops_bench/deployers/factory.py",
+    # "devops_bench/deployers/__init__.py",
+    # "tests/unit/deployers/test_deployers_factory.py",
+    # Terraform stacks (tf/prebuilt -> infra/stacks)
+    # "infra/stacks/**",
+    # evalharness reporter (consumes results/)
+    # "devops_bench/evalharness/reporter.py",
+    # "tests/unit/evalharness/test_reporter.py",
+
+    # --- Wave 5: concretes on the components (parallel) ---
+    # deployers engines
+    # "devops_bench/deployers/tofu.py",
+    # "tests/unit/deployers/test_deployers_tofu.py",
+    # "devops_bench/deployers/noop.py",
+    # "tests/unit/deployers/test_deployers_noop.py",
+    # API agent (agent, skills)
+    # "devops_bench/agents/api/agent.py",
+    # "devops_bench/agents/api/skills.py",
+    # "tests/unit/agents/api/test_agents_api_agent.py",
+    # "tests/unit/agents/api/test_agents_api_skills.py",
+    # chaos: generate-load fault
+    # "devops_bench/chaos/faults/**",
+    # "tests/unit/chaos/test_generate_load.py",
+    # chaos: time-delay trigger
+    # "devops_bench/chaos/triggers/**",
+    # "tests/unit/chaos/test_time_trigger.py",
+    # verification: verifiers
+    # "devops_bench/verification/verifiers/pod_healthy.py",
+    # "tests/unit/verification/test_pod_healthy.py",
+    # "devops_bench/verification/verifiers/scaling_complete.py",
+    # "tests/unit/verification/test_scaling_complete.py",
+    # metric families (each travels with its skills/ guide; see wave 3 skills)
+    # "devops_bench/metrics/grounding.py",
+    # "tests/unit/metrics/test_metrics_grounding.py",
+    # "devops_bench/metrics/tool_invocation.py",
+    # "devops_bench/metrics/checklist.py",
+    # "devops_bench/metrics/outcome_validity.py",
+    # "devops_bench/metrics/chaos_metrics.py",
+    # "tests/unit/metrics/test_metrics_chaos.py",
+    # benchmark task data (batched across owners)
+    # "tasks/**",
+
+    # --- Wave 6: harness base + scenario, and module docs/skills (each after its module lands) ---
+    # "devops_bench/evalharness/base.py",
+    # "devops_bench/evalharness/artifacts.py",
+    # "devops_bench/evalharness/scenario.py",
+    # "devops_bench/evalharness/__init__.py",
+    # "tests/unit/evalharness/test_scenario.py",
+    # docs + skills whose module has fully landed (pr-plan.md §3.4)
+    # "docs/components/infra.md",
+    # "docs/components/model_providers.md",
+    # "docs/how-to/add-a-model-provider.md",
+    # "docs/components/agents.md",
+    # "docs/how-to/add-an-agent-harness.md",
+    # ".agents/references/harness-capabilities.md",
+    # "docs/components/metrics.md",
+    # "docs/how-to/add-a-task.md",
+    # "tasks/AGENTS.md",
+    # ".agents/skills/task-review/**",
+    # ".claude/skills/task-review",
+    # ".agents/skills/devops-bench-review/**",
+    # ".claude/skills/devops-bench-review",
+    # ".agents/references/permission-configs/review-readonly.claude-code.json",
+    # ".agents/references/permission-configs/review-readonly.antigravity.json",
+    # ".agents/skills/cleanup-orphaned-resources/**",
+    # ".claude/skills/cleanup-orphaned-resources",
+
+    # --- Wave 7: default eval harness ---
+    # "devops_bench/evalharness/default.py",
+    # "tests/unit/evalharness/test_default_harness.py",
+    # "tests/unit/evalharness/test_registry_resolution.py",
+    # "tests/unit/evalharness/test_spec_parsing.py",
+    # "tests/unit/evalharness/test_single_env_read.py",
+    # "tests/unit/evalharness/test_e2e_smoke.py",
+    # "tests/unit/evalharness/test_package_import.py",
+
+    # --- Wave 8: entrypoints + cross-cutting tests ---
+    # "devops_bench/cli.py",
+    # "devops_bench/__main__.py",
+    # "devops_bench/run.py",
+    # "tests/unit/run/**",
+    # "tests/unit/comparison/**",
+    # "tests/unit/chaos/test_optimize_scale_regression.py",
+    # "tests/unit/verification/test_optimize_scale_regression.py",
+    # "tests/integration/**",
+
+    # --- Wave 9: eval-lifecycle skills, onboarding + repo-overview docs (need cli/ + evalharness) ---
+    # ".agents/skills/run-eval/**",
+    # ".claude/skills/run-eval",
+    # ".agents/skills/run-parallel-evals/**",
+    # ".claude/skills/run-parallel-evals",
+    # ".agents/skills/validate-eval/**",
+    # ".claude/skills/validate-eval",
+    # ".agents/skills/diagnose-eval-failure/**",
+    # ".claude/skills/diagnose-eval-failure",
+    # ".agents/references/running-evals.md",
+    # ".agents/references/monitoring-and-recovery.md",
+    # ".agents/references/unlimited-mode.md",
+    # ".agents/references/permission-configs/eval-infra.claude-code.json",
+    # ".agents/references/permission-configs/eval-infra.antigravity.json",
+    # ".agents/references/permission-configs/README.md",
+    # "docs/how-to/run-evals.md",
+    # "docs/components/bastion.md",
+    # "docs/getting-started.md",
+    # "docs/README.md",
+    # "docs/components/architecture.md",
+    # "docs/components/glossary.md",
+    # "docs/contributing.md",
+    # "docs/appendix/known_issues.md",
+    # "AGENTS.md",
+    # "CLAUDE.md",
+    # "devops_bench/AGENTS.md",
+    # ".agents/skills/docs-sync/**",
+    # ".claude/skills/docs-sync",
+]

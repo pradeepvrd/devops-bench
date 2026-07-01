@@ -9,7 +9,7 @@
 #
 # Usage:
 #   ./hack/prep-export.sh --branch add-gemini-agent \
-#       --paths "devops_bench/agents/cli/gemini.py tests/unit/agents/test_gemini.py"
+#       --paths "devops_bench/agents/cli/gemini_cli tests/unit/agents/test_agents_cli_gemini.py"
 #
 #   ./hack/prep-export.sh --branch add-gemini-agent --interactive   # carve a sub-file slice
 #

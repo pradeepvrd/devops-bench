@@ -40,6 +40,12 @@ NEVER_SYNC = [
     ".github/**",
     "site/**",
     "site_new/**",
+    # gke-labs-only tooling + docs: the migration toolkit runs the migration itself, and the
+    # leaderboard assets are tied to the gke-labs site. None of it migrates (see pr-plan.md §3.4).
+    "docs/migration/**",
+    ".agents/skills/migration-prep/**",
+    ".claude/skills/migration-prep",
+    "docs/how-to/leaderboard.md",
     "copy.bara.sky",
     "migrated.bara.sky",
     "pyproject.toml",

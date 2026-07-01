@@ -1,0 +1,34 @@
+# Blocks PRs that add to or modify deprecated legacy codepaths (pkg/, deployers/, skills/, site/)
+# unless the PR carries the 'legacy-override' label. Deletions are always allowed. The canonical
+# pipeline is devops_bench/. See hack/check-legacy-readonly.sh.
+# No path filter: the guard always runs and no-ops fast when clean, so it can be a required check
+# without the "skipped required check stays pending" problem.
+name: legacy-guard
+
+on:
+  pull_request:
+    branches: [main]
+    # labeled/unlabeled so applying or removing 'legacy-override' re-runs the guard immediately.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-readonly:
+    # On label events, only re-run when the 'legacy-override' label itself changes; ignore other
+    # label churn. Always run on code events (opened/synchronize/reopened).
+    if: >-
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled')
+      || github.event.label.name == 'legacy-override'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # need the base branch to diff the PR range
+      - name: Block adds/edits to legacy codepaths (deletions allowed)
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          # Override hook: the 'legacy-override' label (passed via env, not interpolated).
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: ./hack/check-legacy-readonly.sh
