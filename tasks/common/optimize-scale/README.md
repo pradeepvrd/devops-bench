@@ -92,17 +92,24 @@ at 15s, the objectives above are still evaluated against a cluster that was neve
 entry's status in `results.json` before reading a passing score as evidence the workload absorbed
 anything.
 
-## Why kind
+## Why GKE
 
-The metrics objective needs a working metrics pipeline. A stock kind cluster ships none, which is
-why this task used to run on GKE: `ScalingActive` would read `False` for reasons that have nothing
-to do with the agent. The stack now installs metrics-server itself under `infra_provider=kind`, so
-**Autoscaler Is Reading Live Metrics** is decided by the agent again.
+This task is pinned to `gcp`, which is what every published run of it was graded against.
 
-On kind the Service is a `ClusterIP` and the chaos load reaches it through the harness
-port-forward. Set `INFRA_PROVIDER=gcp` to run on GKE instead, where the Service is a
-`LoadBalancer` the load generator can reach directly — worth doing if a run shows the port-forward
-dropping connections under sustained load.
+The metrics objective needs a working metrics pipeline. GKE ships metrics-server; a stock kind
+cluster does not, so `ScalingActive` would read `False` for reasons that have nothing to do with
+the agent. The stack now installs metrics-server itself under `infra_provider=kind`, so that
+reason alone no longer forces GKE.
+
+The load path is what still does. On GKE the Service is a `LoadBalancer` and the chaos generator
+reaches it directly; on kind it is a `ClusterIP` behind the harness port-forward. The planned load
+spike failed to inject in **8 of 8** published runs, so the fewer moving parts in that path the
+better until a spike is demonstrably landing.
+
+`INFRA_PROVIDER=kind` is a genuinely working alternative now — metrics included — and much cheaper
+for local iteration on the fixture. Whichever you pick, **every runner must pick the same one**:
+the provider changes the Service type and the load path, so a kind arm and a GKE arm are not
+comparable on this task.
 
 ## Run
 
