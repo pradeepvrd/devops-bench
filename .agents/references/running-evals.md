@@ -83,6 +83,20 @@ fail, work the `404 Publisher model` row in
 [known_issues.md](../../docs/appendix/known_issues.md) — it carries the full
 fix (the location and model-id requirements).
 
+**Chaos driver.** `CHAOS_MODEL` needs the same treatment, and it is easy to
+miss because the judge and the chaos driver do not resolve models the same way.
+The judge reaches Vertex, where `gemini-3.1-pro` exists; the chaos driver goes
+through the API key, whose endpoint publishes only `gemini-3.1-pro-preview` and
+answers `gemini-3.1-pro` with `404 ... is not found for API version v1beta`. A
+judge that works is therefore no evidence that chaos will.
+
+The failure does not look like a bad model id. The fault never injects, the run
+is recorded `verification_status: chaos_invalidated`, and correctness is
+withheld — which reads as "the spike did not land" rather than "the driver
+could not call a model". Only `optimize-scale` declares a chaos spec, so it is
+the only task that shows it. Check `chaos_report.error` in `results.json`
+before treating an invalidated spike as an infrastructure problem.
+
 ---
 
 ## Clean-environment pre-flight
