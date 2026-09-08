@@ -432,7 +432,8 @@ class DefaultEvalHarness(Harness):
         Called exactly once, from :meth:`__init__`. Starts from
         :meth:`AgentConfig.from_env` so existing ``AGENT_*`` knobs continue
         to flow through (``model``, ``provider``, ``api_key``, ``target``,
-        ``timeout``, ``max_turns``, ``extra_env``), then replaces
+        ``timeout``, ``max_turns``, ``extra_env``, ``extra_flags``), then
+        replaces
         capabilities with the orchestrator-owned aggregate so the agent
         cannot see a granted MCP binding when ``use_mcp`` is False.
         """
@@ -447,6 +448,12 @@ class DefaultEvalHarness(Harness):
             max_turns=base.max_turns,
             capabilities=capabilities,
             extra_env=base.extra_env,
+            # Rebuilding field-by-field silently drops anything not named
+            # here. Omitting extra_flags meant AGENT_EXTRA_FLAGS parsed fine
+            # and then never reached the binary, so agy kept its 5m default
+            # --print-timeout and every run longer than that died mid-task
+            # with "timeout waiting for response".
+            extra_flags=base.extra_flags,
             sandbox=base.sandbox,
         )
 
