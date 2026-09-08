@@ -27,6 +27,7 @@ from devops_bench import core
 from devops_bench.agents import base
 from devops_bench.agents import config as agents_config
 from devops_bench.agents import result as agents_result
+from devops_bench.agents import sandbox as sandbox_mod
 from devops_bench.agents.cli.antigravity import parsing
 from devops_bench.agents.shared import cli_capabilities
 from devops_bench.core import subprocess as devops_subprocess
@@ -254,10 +255,18 @@ class AgyCliAgent(base.AgentHarness):
                 env_overlay["GCP_LOCATION"] = location
 
             # Explicit gemini_dir keeps agy on the workspace settings, not real HOME.
+            # The argv crosses the sandbox boundary verbatim, so the config
+            # dir must be the container spelling — same idiom as openclaw's
+            # OPENCLAW_STATE_DIR translation. Host spelling stays in
+            # gemini_dir for the post-run transcript read on this side.
+            gemini_dir_arg = str(gemini_dir)
+            spec = self.config.sandbox
+            if spec is not None and spec.workspace is not None:
+                gemini_dir_arg = sandbox_mod.container_path(spec.workspace, gemini_dir)
             argv = [
                 binary,
                 "--dangerously-skip-permissions",
-                f"--gemini_dir={gemini_dir}",
+                f"--gemini_dir={gemini_dir_arg}",
             ]
             if project:
                 argv.append(f"--project={project}")
