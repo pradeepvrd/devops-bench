@@ -92,16 +92,17 @@ at 15s, the objectives above are still evaluated against a cluster that was neve
 entry's status in `results.json` before reading a passing score as evidence the workload absorbed
 anything.
 
-## Why GKE
+## Why kind
 
-The metrics objective needs a working metrics pipeline. GKE ships metrics-server; a stock kind
-cluster does not, so `ScalingActive` would read `False` there for reasons that have nothing to do
-with the agent.
+The metrics objective needs a working metrics pipeline. A stock kind cluster ships none, which is
+why this task used to run on GKE: `ScalingActive` would read `False` for reasons that have nothing
+to do with the agent. The stack now installs metrics-server itself under `infra_provider=kind`, so
+**Autoscaler Is Reading Live Metrics** is decided by the agent again.
 
-`tf/prebuilt/optimize-scale` still supports `infra_provider=kind` — it swaps the Service to
-`ClusterIP` and relies on the harness port-forward — and running with `INFRA_PROVIDER=kind` is
-much cheaper if you only want to exercise the fixture. Expect **Autoscaler Is Reading Live
-Metrics** to fail unless you install metrics-server yourself.
+On kind the Service is a `ClusterIP` and the chaos load reaches it through the harness
+port-forward. Set `INFRA_PROVIDER=gcp` to run on GKE instead, where the Service is a
+`LoadBalancer` the load generator can reach directly — worth doing if a run shows the port-forward
+dropping connections under sustained load.
 
 ## Run
 
