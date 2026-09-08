@@ -178,10 +178,25 @@ class AgyCliAgent(base.AgentHarness):
     """Antigravity CLI agent harness driving the ``agy`` binary.
 
     Lays down capabilities (rules, MCP, skills) in the workspace
-    directory and spawns the ``agy`` binary. It preserves the user's real
-    HOME to leverage cached OAuth/ADC credentials. The trajectory is
-    extracted by parsing the generated transcript JSONL log file.
+    directory and spawns the ``agy`` binary. The trajectory is extracted by
+    parsing the generated transcript JSONL log file.
+
+    **Credentials and HOME.** Unsandboxed, the run inherits the operator's real
+    HOME so ``agy`` can use its cached OAuth token and ADC. Sandboxed, HOME is
+    container-owned (``/workspace/home``) and the operator's profile is not
+    mounted at all — which is the point. The one credential the agent still
+    needs, its OAuth token, crosses deliberately: it is *copied* into the
+    per-run config dir under the workspace (see ``_execute``), so it rides in
+    on the workspace mount rather than through the operator's home. ADC and the
+    gcloud config never cross; the sandbox's deny filter drops them.
     """
+
+    # Every agent-owned subprocess here goes through run_agent_cmd, so a
+    # sandboxed run is actually contained. The gcloud project/location lookups
+    # stay on the host deliberately: they run before the agent, read the
+    # operator's own config to resolve defaults, and their result crosses as a
+    # value in the settings file rather than as access to gcloud.
+    supports_sandbox = True
 
     def __init__(self, config: agents_config.AgentConfig | None = None) -> None:
         super().__init__(config)
@@ -297,12 +312,18 @@ class AgyCliAgent(base.AgentHarness):
             completed: devops_subprocess.CompletedProcess | None = None
             timeout_exc: core.SubprocessError | None = None
             try:
-                completed = devops_subprocess.run(
+                # Through the sandbox seam: containerised when
+                # ``config.sandbox`` is set, byte-identical to the previous
+                # direct ``run(...)`` otherwise. The overlay is the resolved
+                # configuration, so it is exactly what should cross the
+                # boundary — by value, never as inherited process env.
+                completed = self.run_agent_cmd(
                     argv,
                     extra_env=env_overlay,
                     cwd=workdir,
                     check=False,
                     timeout=self.config.timeout_sec,
+                    host_run=devops_subprocess.run,
                 )
             except core.SubprocessError as exc:
                 # check=False means this can only be a timeout. agy may have

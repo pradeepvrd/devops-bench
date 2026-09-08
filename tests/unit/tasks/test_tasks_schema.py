@@ -224,6 +224,7 @@ def test_to_dict_roundtrip_fields():
         "infrastructure",
         "documentation",
         "validated",
+        "requires_unsandboxed",
     }
 
 
