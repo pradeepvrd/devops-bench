@@ -195,12 +195,6 @@ DEFAULT_RULES: tuple[SensitiveAccessRule, ...] = (
         "settings and possibly keys), matrix runner scripts, and the on-host "
         "run-output tree.",
         severity="high",
-        # These four are bare FILENAMES sitting at the top of the operator's
-        # home, so any listing of home prints them. That is a real signal when
-        # the agent had no business in home — and pure noise when its own
-        # prompt sent it there for a fixture. See
-        # ``narrow_home_listing_rules``, which downgrades this one rule to
-        # args-only for exactly the records whose prompt names a home fixture.
         patterns=(
             r"bench\.env\b",
             r"matrix-runs\b",
