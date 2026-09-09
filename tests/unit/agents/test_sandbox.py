@@ -564,13 +564,46 @@ def test_wrap_argv_sets_user_mapping_on_linux_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
 
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     assert "--user" in executor.wrap_argv(["gemini"])
+    assert "1000:1000" in executor.wrap_argv(["gemini"])
 
     monkeypatch.setattr(sandbox.sys, "platform", "darwin")
     # Docker Desktop already remaps file ownership on macOS.
     assert "--user" not in executor.wrap_argv(["gemini"])
+
+
+def test_wrap_argv_remaps_user_when_uid_exceeds_dockers_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An external IdP can hand out a uid past docker's int32 ``--user``
+    limit; docker would otherwise refuse to start the container at all."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    argv = executor.wrap_argv(["gemini"])
+
+    assert "--user" in argv
+    assert argv[argv.index("--user") + 1] == "1000:1000"
+
+
+def test_wrap_argv_remaps_user_when_gid_exceeds_dockers_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 3998470835)
+
+    argv = executor.wrap_argv(["gemini"])
+
+    assert "--user" in argv
+    assert argv[argv.index("--user") + 1] == "1000:1000"
 
 
 def test_wrap_argv_maps_a_cwd_under_the_workspace(tmp_path: Path) -> None:
@@ -609,6 +642,10 @@ def test_executor_run_reaps_the_container_on_timeout(
     """``--rm`` cannot clean up a container whose ``docker run`` client was
     SIGKILLed by the host-side timeout; the executor must kill by name."""
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    # In-range ids: this test is about timeout reaping, not id remapping, so
+    # it must not depend on the real host's uid/gid.
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
     kills: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
@@ -651,6 +688,10 @@ def test_executor_run_passes_through_check_and_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    # In-range ids: this test is about check/timeout passthrough, not id
+    # remapping, so it must not depend on the real host's uid/gid.
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
     seen: dict = {}
 
     def fake_run(argv, **kwargs):
@@ -663,6 +704,180 @@ def test_executor_run_passes_through_check_and_timeout(
 
     assert seen["check"] is False
     assert seen["timeout"] == 15.5
+
+
+def test_executor_run_skips_chown_containers_when_ids_are_in_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No new containers, no chowns, when both host ids fit docker's ``--user``
+    range: the in-range path is unchanged, and a caller already running as
+    root (uid 0) is in range and so takes this existing path untouched."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    executor.run(["gemini"], check=False)
+
+    assert not any("chown" in call for call in calls)
+    assert len(calls) == 2  # the agent container, then the by-name kill
+
+
+def test_executor_run_chowns_workspace_and_fixtures_around_a_remapped_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the caller's uid is out of docker's ``--user`` range, a pre-run
+    chown to the remap id and a post-run chown back to the real id must
+    bracket the agent container, covering the workspace AND every fixture
+    mount (fixtures live outside the workspace, in the operator's home)."""
+    fixture = tmp_path / "fixture-repo"
+    fixture.mkdir()
+    spec = _complete_spec(
+        tmp_path, fixture_mounts={str(fixture): "/workspace/home/fixture-repo"}
+    )
+    executor = sandbox.SandboxExecutor(spec)
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 3998470835)
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    executor.run(["gemini"], check=False)
+
+    chown_calls = [call for call in calls if "chown" in call]
+    assert len(chown_calls) == 2
+    pre, post = chown_calls
+    assert "1000:1000" in pre
+    assert f"{spec.workspace}:/workspace" in pre
+    assert f"{fixture}:/workspace/home/fixture-repo" in pre
+    assert "3998470835:3998470835" in post
+    assert f"{spec.workspace}:/workspace" in post
+    assert f"{fixture}:/workspace/home/fixture-repo" in post
+
+    agent_call = next(call for call in calls if "chown" not in call and call[:2] == ["docker", "run"])
+    assert agent_call[agent_call.index("--user") + 1] == "1000:1000"
+
+
+def test_executor_run_chowns_workspace_and_fixtures_when_only_the_gid_is_out_of_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 3998470835)
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    executor.run(["gemini"], check=False)
+
+    chown_calls = [call for call in calls if "chown" in call]
+    assert len(chown_calls) == 2
+    assert "1000:1000" in chown_calls[0]
+    assert "1000:3998470835" in chown_calls[1]
+
+
+def test_executor_run_chowns_back_even_when_the_agent_container_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The handback runs in a ``finally``: an agent crash must not strand the
+    remapped, root-owned artifacts."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "chown" not in argv:
+            raise SubprocessError(argv, returncode=1, stdout="", stderr="agent crashed")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with pytest.raises(SubprocessError):
+        executor.run(["gemini"])
+
+    chown_calls = [call for call in calls if "chown" in call]
+    assert len(chown_calls) == 2
+
+
+def test_executor_run_raises_sandboxerror_when_the_pre_run_chown_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Fatal, not best-effort: without the pre-run chown the remapped,
+    unprivileged agent could not write its own workspace, so the run must
+    refuse rather than produce a misleading result."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    def fake_run(argv, **kwargs):
+        if "chown" in argv:
+            raise SubprocessError(argv, returncode=1, stdout="", stderr="boom")
+        raise AssertionError("the agent container must not run when the pre-run chown fails")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with pytest.raises(SandboxError, match="chown"):
+        executor.run(["gemini"])
+
+
+def test_executor_run_handback_failure_does_not_mask_a_successful_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed handback chown is logged with the literal repair command, but
+    a real agent result must still come back to the caller."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["docker", "kill"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
+        if "chown" in argv and "3998470835:1000" in argv:
+            raise SubprocessError(argv, returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="agent output", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with caplog.at_level("ERROR"):
+        result = executor.run(["gemini"], check=False)
+
+    assert result.stdout == "agent output"
+    assert "docker run --rm" in caplog.text
+    assert "chown" in caplog.text
+    assert "3998470835:1000" in caplog.text
+
+
+def test_wrap_argv_omits_user_flag_on_non_linux_even_when_ids_are_out_of_range(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Non-Linux still omits ``--user`` entirely, as before; the remap only
+    exists to keep ``--user`` usable on Linux."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "darwin")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 3998470835)
+
+    assert "--user" not in executor.wrap_argv(["gemini"])
 
 
 # -- the run_agent_cmd seam --------------------------------------------------------
@@ -721,6 +936,10 @@ def test_run_agent_cmd_dispatches_to_the_executor_when_sandbox_is_set(
 ) -> None:
     spec = _complete_spec(tmp_path)
     agent = _DummyAgent(AgentConfig(sandbox=spec))
+    # In-range ids: this test is about seam dispatch, not id remapping, so it
+    # must not depend on the real host's uid/gid.
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
     docker_argvs: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
