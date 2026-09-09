@@ -76,10 +76,13 @@ Pick one mode:
   key rather than guessing.
 
 **Judge.** The wrapper defaults `JUDGE_PROVIDER=google` and
-`JUDGE_MODEL=gemini-3.1-pro`; on the ambient-credentials backend the default id
-must be overridden to its `-preview` variant
-(`JUDGE_MODEL=gemini-3.1-pro-preview`). If judge calls return 404 or silently
-fail, work the `404 Publisher model` row in
+`JUDGE_MODEL=gemini-3.1-pro-preview` — the id the API-key endpoint publishes,
+because that is the path the bastion actually uses. Vertex publishes the id
+without the suffix, so a Vertex-backed run overrides it to `gemini-3.1-pro`.
+Getting this wrong used to be silent; `preflight_models` now makes one call to
+the judge and the chaos driver before anything is provisioned, so a bad id
+fails in seconds instead of after a whole matrix. If judge calls return 404 or
+silently fail, work the `404 Publisher model` row in
 [known_issues.md](../../docs/appendix/known_issues.md) — it carries the full
 fix (the location and model-id requirements).
 
