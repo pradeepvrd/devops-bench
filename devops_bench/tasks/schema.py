@@ -132,6 +132,14 @@ class Task(BaseModel):
         validated: Whether the task has been vetted as correct and is eligible to
             promote to the leaderboard. Defaults to ``False`` so an unvetted task
             never counts until explicitly marked.
+        requires_unsandboxed: Opt this task out of the agent sandbox even when
+            the run asks for one. For a task whose objective *is* the credential
+            the sandbox withholds: ``secret-rotation`` drives Secret Manager
+            through Application Default Credentials, and ADC is exactly what the
+            boundary strips, so a sandboxed run cannot do the task at all.
+            Declared on the task rather than passed per-run so the exemption
+            travels with the thing that needs it and is visible to anyone
+            reading the spec.
     """
 
     model_config = _STRICT
@@ -148,13 +156,6 @@ class Task(BaseModel):
     infrastructure: dict[str, Any] = Field(default_factory=dict)
     documentation: list[DocumentationEntry] = Field(default_factory=list)
     validated: bool = False
-    #: Opt this task out of the agent sandbox even when the run asks for one.
-    #: For a task whose objective *is* the credential the sandbox withholds:
-    #: ``secret-rotation`` drives Secret Manager through Application Default
-    #: Credentials, and ADC is exactly what the boundary strips, so a sandboxed
-    #: run cannot do the task at all. Declared on the task rather than passed
-    #: per-run so the exemption travels with the thing that needs it and is
-    #: visible to anyone reading the spec.
     requires_unsandboxed: bool = False
 
     @model_validator(mode="before")
@@ -218,6 +219,7 @@ class Task(BaseModel):
         infrastructure = raw.get("infrastructure", {})
         documentation = raw.get("documentation", [])
         validated = raw.get("validated", False)
+        requires_unsandboxed = raw.get("requires_unsandboxed", False)
 
         return cls.model_validate(
             {
@@ -235,6 +237,9 @@ class Task(BaseModel):
                 "infrastructure": {} if infrastructure is None else infrastructure,
                 "documentation": [] if documentation is None else documentation,
                 "validated": False if validated is None else validated,
+                "requires_unsandboxed": (
+                    False if requires_unsandboxed is None else requires_unsandboxed
+                ),
             }
         )
 
