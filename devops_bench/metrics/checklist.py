@@ -127,6 +127,7 @@ class ChecklistMetric:
 
         out: list[MetricScore] = []
         passed = 0
+        unjudged = 0
         total = len(dynamic_metrics)
         for m in dynamic_metrics:
             try:
@@ -136,15 +137,34 @@ class ChecklistMetric:
                     if ms.success:
                         passed += 1
             except Exception as e:  # noqa: BLE001 - keep scoring the rest
+                unjudged += 1
                 _log.error("Error evaluating metric %s: %s", m.name, e)
 
-        ratio = passed / total if total > 0 else 0.0
+        # A check the judge could not evaluate is not a check the agent failed.
+        # Scoring it as a failure is how a dead judge reads as a dead agent: a
+        # misconfigured JUDGE_MODEL made every GEval raise, and ten runs
+        # published "Passed 0 out of N checks" with no per-check verdict at all
+        # while their deterministic correctness was 0.889-1.000. Unjudged items
+        # leave the denominator; if NOTHING could be judged there is no opinion
+        # to publish, so the metric abstains and the composite withholds rather
+        # than zeroing.
+        judged = total - unjudged
+        if total > 0 and judged == 0:
+            _log.error(
+                "the judge evaluated none of %d checklist item(s); withholding "
+                "ChecklistScore rather than reporting a zero the judge never measured",
+                total,
+            )
+            return out
+
+        ratio = passed / judged if judged > 0 else 0.0
+        suffix = f" ({unjudged} could not be judged)" if unjudged else ""
         out.append(
             MetricScore(
                 name="ChecklistScore",
                 score=ratio,
-                success=ratio >= CHECKLIST_THRESHOLD if total > 0 else False,
-                reason=f"Passed {passed} out of {total} checks.",
+                success=ratio >= CHECKLIST_THRESHOLD if judged > 0 else False,
+                reason=f"Passed {passed} out of {judged} evaluated checks{suffix}.",
             )
         )
         return out

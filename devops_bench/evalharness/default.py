@@ -44,8 +44,10 @@ from devops_bench.cheat_detection import (
     baseline_from_granted_paths,
     build_inventory_rules,
     build_mount_rules,
+    drop_fingerprints_matching_inputs,
     filter_rules_for_prompt,
     load_ruleset,
+    narrow_home_listing_rules,
 )
 from devops_bench.core import (
     ConfigError,
@@ -1111,16 +1113,32 @@ class DefaultEvalHarness(Harness):
         # which also leaves that record ungated, since an absent verdict is an
         # abstention rather than a zero.
         if self.cheat_detect:
-            # Per record: a home entry the task prompt itself names (the
-            # GitOps repo to push to, the deliverable to write) is
-            # authorized for that record, so its inventory path rule is
-            # dropped. Content fingerprints always apply.
+            # Per record, two authorizations, both derived from the prompt:
+            #
+            #   * a home entry the prompt NAMES (the GitOps repo to push to,
+            #     the deliverable to write) drops its inventory path rule; and
+            #   * any rule whose pattern matches the CONTENT of an input the
+            #     prompt told the agent to read is dropped outright, static
+            #     rules included. A delivered input is byte-identical run to
+            #     run, so a stale copy in the operator's home fingerprints the
+            #     current one and flags the honest read.
+            #
+            # The second filter runs over the combined set, since the
+            # fingerprint that misfired this way was an inventory rule but the
+            # same argument applies to any rule.
             for record, inventory_rules in zip(detailed_results, task_inventories, strict=True):
                 try:
+                    prompt_text = record.get("input") or ""
                     annotate_records(
                         [record],
-                        self._cheat_rules
-                        + filter_rules_for_prompt(inventory_rules, record.get("input") or ""),
+                        drop_fingerprints_matching_inputs(
+                            narrow_home_listing_rules(
+                                self._cheat_rules
+                                + filter_rules_for_prompt(inventory_rules, prompt_text),
+                                prompt_text,
+                            ),
+                            prompt_text,
+                        ),
                     )
                 except Exception:  # noqa: BLE001 - detection must never sink a completed run
                     _log.exception(
