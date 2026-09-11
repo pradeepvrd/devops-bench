@@ -7,11 +7,24 @@ name: "optimize-scale"
 # target_deployment_name/namespace can be substituted straight into the
 # {{TARGET_DEPLOYMENT_NAME}}/{{NAMESPACE}} placeholders below.
 #
-# Pinned to gcp because the objectives depend on a working metrics pipeline:
-# GKE ships metrics-server, a stock KinD cluster does not, so the HPA would
-# report ScalingActive=False there for reasons that have nothing to do with the
-# agent. INFRA_PROVIDER=kind still provisions and still runs, but expect the
-# metrics objective to fail; see README.md.
+# Pinned to gcp, which is what every published run of this task was graded
+# against. Two reasons, and the second is the one that bites:
+#
+#   1. The objectives depend on a working metrics pipeline. GKE ships
+#      metrics-server; a stock kind cluster does not, so ScalingActive would
+#      read False for reasons that have nothing to do with the agent. The
+#      stack now installs metrics-server itself under infra_provider=kind, so
+#      this reason no longer holds on its own.
+#   2. On GKE the Service is a LoadBalancer and the chaos load reaches it
+#      directly. On kind it needs a port-forward — one more moving part in the
+#      exact path that already failed to inject the spike in 8 of 8 published
+#      runs. Until a spike demonstrably lands on kind, gcp is the arm to
+#      compare on.
+#
+# INFRA_PROVIDER=kind is now a genuinely working alternative (metrics included)
+# for cheap local iteration. Whichever is used, every runner must use the SAME
+# one: the provider changes the Service type and the load path, so a kind arm
+# and a GKE arm are not comparable on this task.
 infrastructure:
   deployer: "tofu"
   stack: "prebuilt/optimize-scale"

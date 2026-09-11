@@ -225,6 +225,7 @@ def test_to_dict_roundtrip_fields():
         "documentation",
         "agent_pod_security",
         "validated",
+        "requires_unsandboxed",
     }
 
 

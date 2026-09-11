@@ -94,14 +94,22 @@ anything.
 
 ## Why GKE
 
-The metrics objective needs a working metrics pipeline. GKE ships metrics-server; a stock kind
-cluster does not, so `ScalingActive` would read `False` there for reasons that have nothing to do
-with the agent.
+This task is pinned to `gcp`, which is what every published run of it was graded against.
 
-`tf/prebuilt/optimize-scale` still supports `infra_provider=kind` — it swaps the Service to
-`ClusterIP` and relies on the harness port-forward — and running with `INFRA_PROVIDER=kind` is
-much cheaper if you only want to exercise the fixture. Expect **Autoscaler Is Reading Live
-Metrics** to fail unless you install metrics-server yourself.
+The metrics objective needs a working metrics pipeline. GKE ships metrics-server; a stock kind
+cluster does not, so `ScalingActive` would read `False` for reasons that have nothing to do with
+the agent. The stack now installs metrics-server itself under `infra_provider=kind`, so that
+reason alone no longer forces GKE.
+
+The load path is what still does. On GKE the Service is a `LoadBalancer` and the chaos generator
+reaches it directly; on kind it is a `ClusterIP` behind the harness port-forward. The planned load
+spike failed to inject in **8 of 8** published runs, so the fewer moving parts in that path the
+better until a spike is demonstrably landing.
+
+`INFRA_PROVIDER=kind` is a genuinely working alternative now — metrics included — and much cheaper
+for local iteration on the fixture. Whichever you pick, **every runner must pick the same one**:
+the provider changes the Service type and the load path, so a kind arm and a GKE arm are not
+comparable on this task.
 
 ## Run
 
