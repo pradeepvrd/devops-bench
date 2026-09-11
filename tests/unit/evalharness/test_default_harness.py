@@ -1645,10 +1645,23 @@ def test_sandbox_exempt_task_gets_a_config_with_no_sandbox(isolated_env: None) -
 
 
 def test_secret_rotation_declares_requires_unsandboxed() -> None:
-    """The exemption travels with the task that needs it, not with a runner flag."""
+    """The exemption travels with the task that needs it, not with a runner flag.
+
+    Loaded through the real loader, not read as raw YAML: ``Task.from_dict``
+    builds an explicit field mapping and ``Task`` ignores unknown keys, so a key
+    missing from that mapping is dropped silently — a raw-YAML assertion stays
+    green while the harness sees the ``False`` default. The raw-YAML check stays
+    alongside as a spec-content check, but the loader path is the coverage.
+    """
     import pathlib
 
     import yaml as _yaml
+
+    from devops_bench.tasks.loader import FileSystemTaskLoader
+
+    tasks = FileSystemTaskLoader().load_tasks("tasks/gcp/secret-rotation/task.yaml")
+    assert len(tasks) == 1
+    assert tasks[0].requires_unsandboxed is True
 
     spec = _yaml.safe_load(
         pathlib.Path("tasks/gcp/secret-rotation/task.yaml").read_text(encoding="utf-8")

@@ -92,24 +92,28 @@ at 15s, the objectives above are still evaluated against a cluster that was neve
 entry's status in `results.json` before reading a passing score as evidence the workload absorbed
 anything.
 
-## Why GKE
+## Why kind
 
-This task is pinned to `gcp`, which is what every published run of it was graded against.
+Two things used to argue for GKE, and neither survives measurement.
 
-The metrics objective needs a working metrics pipeline. GKE ships metrics-server; a stock kind
-cluster does not, so `ScalingActive` would read `False` for reasons that have nothing to do with
-the agent. The stack now installs metrics-server itself under `infra_provider=kind`, so that
-reason alone no longer forces GKE.
+Metrics: the HPA objective grades `ScalingActive=True`, which needs a live
+metrics pipeline. A stock kind cluster ships none — but the stack now installs
+metrics-server itself under `infra_provider=kind`, so the objective is decided
+by the agent again.
 
-The load path is what still does. On GKE the Service is a `LoadBalancer` and the chaos generator
-reaches it directly; on kind it is a `ClusterIP` behind the harness port-forward. The planned load
-spike failed to inject in **8 of 8** published runs, so the fewer moving parts in that path the
-better until a spike is demonstrably landing.
+The load path: on GKE the Service is a LoadBalancer the chaos generator was
+meant to reach directly. In practice it cannot — fortio times out on the
+external IP (`dial tcp <ip>:8080: i/o timeout`) because the project's firewall
+admits only 22/3389/443, so the spike never injects. On kind the Service is a
+`ClusterIP` behind the harness port-forward, which connects and serves the
+spike.
 
-`INFRA_PROVIDER=kind` is a genuinely working alternative now — metrics included — and much cheaper
-for local iteration on the fixture. Whichever you pick, **every runner must pick the same one**:
-the provider changes the Service type and the load path, so a kind arm and a GKE arm are not
-comparable on this task.
+The historic 8-of-8 injection failures were a third thing entirely: every chaos
+command shared a 40s ceiling, and this task declares a 300s spike, so fortio was
+killed mid-run and the fault reported "load did not reach the workload".
+
+`INFRA_PROVIDER=gcp` still selects GKE and is the better load path once a runner
+can reach a LoadBalancer.
 
 ## Run
 
