@@ -1,12 +1,8 @@
 task_id: 25
 name: "secret-rotation"
-# Runs inside the agent sandbox like every other task. The task IS credential
-# work: the agent rotates a Secret Manager version and re-syncs it through
-# ExternalSecrets, and the boundary strips Application Default Credentials. The
-# stack therefore exports `agent_cloud_identity`, a run-unique service account
-# holding only this task's Secret Manager roles; the harness mints a short-lived
-# impersonated token for it and passes that into the container by value (see
-# Provider.sandbox_cloud_credential_env). No key file, no operator ADC crosses.
+# Sandboxed runs get a short-lived impersonated token for the stack's
+# `agent_cloud_identity` (a run-unique service account holding only this task's
+# Secret Manager roles); no key file or operator ADC crosses the boundary.
 # Provisions its own GKE cluster, a Secret Manager secret with exactly one
 # version, a Workload-Identity-bound service account, the ExternalSecrets
 # operator, and a workload that mounts the synced Secret. Version "1" of the

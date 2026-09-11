@@ -90,11 +90,8 @@ echo "==> Removing Kyverno's built-in report cleanup CronJobs..."
 kubectl delete cronjob -n kyverno --all --ignore-not-found
 kubectl delete job -n kyverno --all --ignore-not-found
 
-echo "==> Aggregating a Kyverno policy-editor role into the built-in edit role..."
-# Kyverno aggregates its policy roles only into view and admin. A principal
-# bound to edit, which is the sandboxed agent's scope, could otherwise read the
-# ClusterPolicies but never set them to Enforce, so the enforcement objectives
-# would fail silently. Harmless for an unsandboxed run, which is cluster-admin.
+echo "==> Aggregating a Kyverno policy-editor role into edit..."
+# Kyverno aggregates into view and admin only; the sandboxed agent is edit-bound.
 kubectl apply -f "${MANIFESTS_DIR}/rbac/"
 
 echo "==> Applying compliance policies (audit mode)..."

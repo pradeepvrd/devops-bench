@@ -364,24 +364,14 @@ installs, and the supplement grants only `get`/`list`/`watch` on
 gets on a given CRD is therefore whatever that operator chose to aggregate into
 `edit`, which is usually nothing.
 
-`opa-remediation` was the measured instance. Kyverno v1.12.7 ships
-`kyverno:rbac:view:policies` labelled `aggregate-to-view` and
-`kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
-`aggregate-to-edit` on either. Aggregation flows view into edit and edit into
-admin, so an `edit`-bound agent could read `ClusterPolicy` objects and not
-write them, and the two objectives that flip both policies from `Audit` to
-`Enforce` were unreachable under the default scope. Nothing in a trajectory
-said so: neither agent that ran the task attempted the flip, so the run logs
-carried no `forbidden` and the objective read as an agent miss.
-
-The task's own stack now closes that gap the way a platform team would: its
-setup applies a `kyverno-policy-editor` ClusterRole labelled
-`aggregate-to-edit` granting `update`/`patch` on `kyverno.io` policies
-(`tf/prebuilt/opa-remediation/manifests/rbac/`). The general lesson stands for
-any task built on an operator's CRDs — check what that operator aggregates into
-`edit` before assuming a sandboxed run can complete the task, and when it is
-nothing, grant the task's minimum in the task's stack rather than widening the
-harness supplement for every task.
+A task whose objective writes an operator's CRD must grant that in its own
+stack. Kyverno, for example, aggregates its policy roles into `view` and
+`admin` only, so `opa-remediation` applies a `kyverno-policy-editor`
+ClusterRole labelled `aggregate-to-edit` with `update`/`patch` on `kyverno.io`
+policies (`tf/prebuilt/opa-remediation/manifests/rbac/`). Grant the task's
+minimum there rather than widening the harness supplement for every task; an
+objective the scope cannot reach fails silently, since agents rarely attempt a
+write they expect to be denied.
 
 ### Model credentials
 
