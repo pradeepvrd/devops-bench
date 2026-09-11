@@ -152,7 +152,9 @@ _SPECS: dict[str, ProviderSpec] = {
         canonical="ollama",
         adapter_family="ollama",
         oc_provider="ollama",
-        api_key_envs=(),  # optional key handled by the adapter via AGENT_API_KEY
+        # The server needs no key, but oc enables its ollama provider only when
+        # OLLAMA_API_KEY is set (any value), so a configured key is exported there.
+        api_key_envs=("OLLAMA_API_KEY",),
         keyless_ok=True,
         backend=None,
     ),

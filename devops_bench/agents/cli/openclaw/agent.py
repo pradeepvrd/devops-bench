@@ -174,6 +174,11 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "baseUrl": "https://aiplatform.googleapis.com",
         "apiKey": _VERTEX_CREDENTIALS_MARKER,
     },
+    # Direct Anthropic API; the key reaches oc as ANTHROPIC_API_KEY via _build_env.
+    "anthropic": {
+        "api": "anthropic-messages",
+        "baseUrl": "https://api.anthropic.com",
+    },
 }
 # Per-run layout of the node-fetch->native-fetch ESM loader shim (see
 # :func:`_write_node_fetch_shim`), written under the run's own workdir so it

@@ -61,7 +61,7 @@ _ROWS = [
     ("anthropic-bedrock", "anthropic-bedrock", "claude", "anthropic-bedrock", (), True, "bedrock"),
     ("anthropic_bedrock", "anthropic-bedrock", "claude", "anthropic-bedrock", (), True, "bedrock"),
     ("openai", "openai", "openai", "openai", ("OPENAI_API_KEY",), False, None),
-    ("ollama", "ollama", "ollama", "ollama", (), True, None),
+    ("ollama", "ollama", "ollama", "ollama", ("OLLAMA_API_KEY",), True, None),
 ]
 
 
