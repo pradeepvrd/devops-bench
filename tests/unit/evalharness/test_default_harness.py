@@ -1673,16 +1673,16 @@ def test_secret_rotation_declares_requires_unsandboxed() -> None:
 
     tasks = FileSystemTaskLoader().load_tasks("tasks/gcp/secret-rotation/task.yaml")
     assert len(tasks) == 1
-    assert tasks[0].requires_unsandboxed is True
+    assert tasks[0].requires_unsandboxed is False
 
     spec = _yaml.safe_load(
         pathlib.Path("tasks/gcp/secret-rotation/task.yaml").read_text(encoding="utf-8")
     )
-    assert spec.get("requires_unsandboxed") is True
+    assert spec.get("requires_unsandboxed") is False
 
 
 def test_no_other_task_opts_out_of_the_sandbox() -> None:
-    """Exactly one exemption; a second would need its own justification."""
+    """No exemptions; any new one would need its own justification."""
     import pathlib
 
     import yaml as _yaml
@@ -1692,4 +1692,4 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         for p in sorted(pathlib.Path("tasks").glob("*/*/task.yaml"))
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
-    assert exempt == ["secret-rotation"]
+    assert exempt == []
