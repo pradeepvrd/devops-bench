@@ -364,21 +364,24 @@ installs, and the supplement grants only `get`/`list`/`watch` on
 gets on a given CRD is therefore whatever that operator chose to aggregate into
 `edit`, which is usually nothing.
 
-`opa-remediation` is the measured instance. Kyverno v1.12.7 ships
+`opa-remediation` was the measured instance. Kyverno v1.12.7 ships
 `kyverno:rbac:view:policies` labelled `aggregate-to-view` and
 `kyverno:rbac:admin:policies` labelled `aggregate-to-admin`, with no
 `aggregate-to-edit` on either. Aggregation flows view into edit and edit into
-admin, so the agent can read `ClusterPolicy` objects and cannot write them. Two
-of that task's objectives ask it to flip both policies from `Audit` to
-`Enforce`, so **the task cannot be fully passed under the default scope** — one
-of its three deterministic objective groups is unreachable. Sandboxed and
-ambient scores are not comparable for it.
+admin, so an `edit`-bound agent could read `ClusterPolicy` objects and not
+write them, and the two objectives that flip both policies from `Audit` to
+`Enforce` were unreachable under the default scope. Nothing in a trajectory
+said so: neither agent that ran the task attempted the flip, so the run logs
+carried no `forbidden` and the objective read as an agent miss.
 
-Nothing in a trajectory says so. Neither agent that ran the task attempted the
-flip, so the run logs carry no `forbidden` — the objective simply goes
-unattempted and reads as an agent miss. Anything that grades sandboxed runs
-against ambient ones has to account for this class of gap explicitly rather
-than infer it from failures.
+The task's own stack now closes that gap the way a platform team would: its
+setup applies a `kyverno-policy-editor` ClusterRole labelled
+`aggregate-to-edit` granting `update`/`patch` on `kyverno.io` policies
+(`tf/prebuilt/opa-remediation/manifests/rbac/`). The general lesson stands for
+any task built on an operator's CRDs — check what that operator aggregates into
+`edit` before assuming a sandboxed run can complete the task, and when it is
+nothing, grant the task's minimum in the task's stack rather than widening the
+harness supplement for every task.
 
 ### Model credentials
 
