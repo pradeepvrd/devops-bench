@@ -148,6 +148,19 @@ _SPECS: dict[str, ProviderSpec] = {
         keyless_ok=False,
         backend=None,
     ),
+    # OpenAI through a ChatGPT/Codex subscription login instead of an API key.
+    # openclaw's provider id is still ``openai``; it picks the subscription route
+    # when the per-run auth store holds an OAuth profile, which it bootstraps
+    # itself from the Codex CLI login (``$CODEX_HOME/auth.json``, default
+    # ``~/.codex``) and refreshes in place. No key is ever threaded.
+    "openai-codex": ProviderSpec(
+        canonical="openai-codex",
+        adapter_family="openai",
+        oc_provider="openai",
+        api_key_envs=(),
+        keyless_ok=True,
+        backend=None,
+    ),
     "ollama": ProviderSpec(
         canonical="ollama",
         adapter_family="ollama",
@@ -174,6 +187,9 @@ _ALIASES: dict[str, str] = {
     "anthropic-bedrock": "anthropic-bedrock",
     "anthropic_bedrock": "anthropic-bedrock",
     "openai": "openai",
+    "openai-codex": "openai-codex",
+    "openai_codex": "openai-codex",
+    "codex": "openai-codex",
     "ollama": "ollama",
 }
 
