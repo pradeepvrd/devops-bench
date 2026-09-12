@@ -340,6 +340,9 @@ def _build_model_override(config: AgentConfig) -> dict:
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
     if custom_endpoint:
         provider_entry["baseUrl"] = custom_base_url
+        # A self-hosted server usually sits on a loopback or VPC address, which
+        # oc's SSRF guard refuses for model fetches unless the provider opts in.
+        provider_entry["request"] = {"allowPrivateNetwork": True}
     model_entry: dict = {"id": bare, "name": bare}
     context_window = os.environ.get(_CONTEXT_WINDOW_ENV, "").strip()
     if context_window:

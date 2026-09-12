@@ -1286,6 +1286,7 @@ def test_model_override_openai_custom_endpoint(monkeypatch) -> None:
     entry = override["models"]["providers"]["openai"]
     assert entry["api"] == "openai-completions"
     assert entry["baseUrl"] == "http://127.0.0.1:8000/v1"
+    assert entry["request"] == {"allowPrivateNetwork": True}
     assert entry["models"] == [
         {"id": "qwen3.8-27b", "name": "qwen3.8-27b", "contextWindow": 262144}
     ]
