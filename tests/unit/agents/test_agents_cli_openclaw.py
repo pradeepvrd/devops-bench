@@ -1299,3 +1299,14 @@ def test_model_override_rejects_non_integer_context_window(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_CONTEXT_WINDOW", "lots")
     with pytest.raises(ConfigError):
         _build_model_override(AgentConfig(model="qwen3.8-27b", provider="openai"))
+
+
+def test_model_override_custom_endpoint_declares_reasoning(monkeypatch) -> None:
+    """AGENT_MODEL_REASONING marks the model reasoning-capable so oc accepts --thinking."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8000/v1")
+    monkeypatch.delenv("AGENT_CONTEXT_WINDOW", raising=False)
+    monkeypatch.setenv("AGENT_MODEL_REASONING", "true")
+    override = _build_model_override(AgentConfig(model="qwen3.8-27b", provider="openai"))
+    assert override["models"]["providers"]["openai"]["models"] == [
+        {"id": "qwen3.8-27b", "name": "qwen3.8-27b", "reasoning": True}
+    ]
