@@ -193,6 +193,10 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
 # as the model's context window so oc sizes its history accordingly.
 _OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL"
 _CONTEXT_WINDOW_ENV = "AGENT_CONTEXT_WINDOW"
+# oc only accepts a ``--thinking`` level for models whose catalog entry declares
+# reasoning; a per-run entry defaults to none, so a reasoning model behind a
+# custom endpoint must say so explicitly.
+_MODEL_REASONING_ENV = "AGENT_MODEL_REASONING"
 # Per-run layout of the node-fetch->native-fetch ESM loader shim (see
 # :func:`_write_node_fetch_shim`), written under the run's own workdir so it
 # is visible inside the sandboxed container at ``/workspace/node-fetch-shim``.
@@ -341,6 +345,8 @@ def _build_model_override(config: AgentConfig) -> dict:
             raise ConfigError(
                 f"{_CONTEXT_WINDOW_ENV} must be an integer, got {context_window!r}"
             ) from exc
+    if os.environ.get(_MODEL_REASONING_ENV, "").strip().lower() in ("1", "true", "yes"):
+        model_entry["reasoning"] = True
     provider_entry["models"] = [model_entry]
     return {
         "models": {"providers": {provider: provider_entry}},
