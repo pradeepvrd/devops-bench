@@ -179,7 +179,20 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
         "api": "anthropic-messages",
         "baseUrl": "https://api.anthropic.com",
     },
+    # Any OpenAI-compatible server (vLLM, SGLang, a Vertex dedicated endpoint).
+    # ``baseUrl`` comes from OPENAI_BASE_URL at build time; the key reaches oc
+    # as OPENAI_API_KEY via _build_env.
+    "openai": {
+        "api": "openai-completions",
+    },
 }
+
+# Points the ``openai`` provider at a self-hosted OpenAI-compatible server. When
+# set, every ``openai/<id>`` model is registered per run (the server's ids are
+# unknown to oc's catalog) and AGENT_CONTEXT_WINDOW, if set, is passed through
+# as the model's context window so oc sizes its history accordingly.
+_OPENAI_BASE_URL_ENV = "OPENAI_BASE_URL"
+_CONTEXT_WINDOW_ENV = "AGENT_CONTEXT_WINDOW"
 # Per-run layout of the node-fetch->native-fetch ESM loader shim (see
 # :func:`_write_node_fetch_shim`), written under the run's own workdir so it
 # is visible inside the sandboxed container at ``/workspace/node-fetch-shim``.
@@ -302,7 +315,9 @@ def _build_model_override(config: AgentConfig) -> dict:
     if not model_id:
         return {}
     provider, _, bare = model_id.partition("/")
-    if bare not in _CATALOG_OVERRIDES:
+    custom_base_url = os.environ.get(_OPENAI_BASE_URL_ENV, "").strip().rstrip("/")
+    custom_endpoint = provider == "openai" and bool(custom_base_url)
+    if bare not in _CATALOG_OVERRIDES and not custom_endpoint:
         return {}
     # A per-run provider entry *replaces* oc's built-in one, so it must pin a
     # transport; without one oc falls back to the OpenAI transport and 401s. Fail
@@ -315,7 +330,18 @@ def _build_model_override(config: AgentConfig) -> dict:
             f"{', '.join(sorted(_PROVIDER_TRANSPORT))})"
         )
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
-    provider_entry["models"] = [{"id": bare, "name": bare}]
+    if custom_endpoint:
+        provider_entry["baseUrl"] = custom_base_url
+    model_entry: dict = {"id": bare, "name": bare}
+    context_window = os.environ.get(_CONTEXT_WINDOW_ENV, "").strip()
+    if context_window:
+        try:
+            model_entry["contextWindow"] = int(context_window)
+        except ValueError as exc:
+            raise ConfigError(
+                f"{_CONTEXT_WINDOW_ENV} must be an integer, got {context_window!r}"
+            ) from exc
+    provider_entry["models"] = [model_entry]
     return {
         "models": {"providers": {provider: provider_entry}},
         # Allowlist ``provider/id`` for the agent's per-run ``--model`` override.
