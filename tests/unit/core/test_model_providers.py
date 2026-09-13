@@ -255,6 +255,53 @@ def test_token_endpoint_serves_an_impersonated_token(minted, monkeypatch):
     ]
 
 
+def test_an_adc_file_mints_through_application_default_and_wins_over_the_sa(monkeypatch, tmp_path):
+    # A publisher model enabled only for a human identity has no SA to grant,
+    # so the emulator serves the operator's ADC token instead; the file stays
+    # on the host and only the bearer crosses.
+    adc = tmp_path / "adc.json"
+    adc.write_text("{}")
+    monkeypatch.setenv(VERTEX_SANDBOX_SA_ENV, _SA)
+    monkeypatch.setenv(model_providers.VERTEX_SANDBOX_ADC_ENV, str(adc))
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(([str(part) for part in cmd], kwargs.get("extra_env")))
+        return subprocess.CompletedProcess(
+            args=list(cmd), returncode=0, stdout="ya29.adc-token\n", stderr=""
+        )
+
+    monkeypatch.setattr(model_providers, "run", fake_run)
+    sandbox_credential_env(resolve_provider("anthropic-vertex"), project=_PROJECT)
+    (emulator,) = model_providers._EMULATORS.values()
+
+    status, _headers, body = _get(
+        emulator, "/computeMetadata/v1/instance/service-accounts/default/token"
+    )
+    assert status == 200
+    assert json.loads(body)["access_token"] == "ya29.adc-token"
+    assert calls == [
+        (
+            ["gcloud", "auth", "application-default", "print-access-token"],
+            {"GOOGLE_APPLICATION_CREDENTIALS": str(adc)},
+        )
+    ]
+    # The served identity is a label, not the SA that was also configured.
+    _status, _headers, email = _get(
+        emulator, "/computeMetadata/v1/instance/service-accounts/default/email"
+    )
+    assert email == model_providers._ADC_IDENTITY
+
+
+def test_a_missing_adc_file_is_refused_before_anything_starts(monkeypatch, tmp_path):
+    monkeypatch.delenv(VERTEX_SANDBOX_SA_ENV, raising=False)
+    monkeypatch.setenv(model_providers.VERTEX_SANDBOX_ADC_ENV, str(tmp_path / "nope.json"))
+    with pytest.raises(ConfigError) as exc:
+        sandbox_credential_env(resolve_provider("google-vertex"), project=_PROJECT)
+    assert model_providers.VERTEX_SANDBOX_ADC_ENV in str(exc.value)
+    assert model_providers._EMULATORS == {}
+
+
 def test_the_token_is_cached_across_requests(minted, monkeypatch):
     monkeypatch.setenv(VERTEX_SANDBOX_SA_ENV, _SA)
     sandbox_credential_env(resolve_provider("google-vertex"), project=_PROJECT)

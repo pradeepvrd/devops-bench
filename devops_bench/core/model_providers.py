@@ -40,6 +40,7 @@ model-credential layer — and never in :mod:`devops_bench.agents.sandbox`.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,6 +59,7 @@ __all__ = [
     "known_providers",
     "sandbox_credential_env",
     "VERTEX_SANDBOX_SA_ENV",
+    "VERTEX_SANDBOX_ADC_ENV",
 ]
 
 _log = get_logger("core.model_providers")
@@ -265,6 +267,20 @@ def resolve_provider(provider: str | None, *, default: str = "google") -> Provid
 # the container — only the minted token crosses.
 VERTEX_SANDBOX_SA_ENV = "BENCH_VERTEX_SANDBOX_SA"
 
+# Alternative to impersonation: a host path to an Application Default
+# Credentials file whose tokens the emulator serves as-is. For a publisher
+# model that is only enabled for a human identity, no service account can be
+# granted the call, so the operator's own credential is the only one that
+# works. The file itself never crosses the boundary, only the hour-long
+# bearer it mints; that is the same identity exposure an unsandboxed run
+# has, with every other sandbox property kept. Takes precedence over the
+# service account when both are set.
+VERTEX_SANDBOX_ADC_ENV = "BENCH_VERTEX_SANDBOX_ADC"
+
+# Identity label the emulator serves for an ADC-backed token. The auth
+# libraries read the email only to name the account; nothing signs with it.
+_ADC_IDENTITY = "operator-adc"
+
 # Hostname the container uses to reach the emulator. ``SandboxExecutor.wrap_argv``
 # passes ``--add-host host.docker.internal:host-gateway`` on every run, so this
 # resolves to the host from any Docker network the run might join.
@@ -349,20 +365,27 @@ def sandbox_credential_env(
 
 def _vertex_metadata_env(*, project: str | None, service_account: str | None) -> dict[str, str]:
     """Start (or reuse) the Vertex metadata emulator and return the container's env."""
+    adc_path = (get_env(VERTEX_SANDBOX_ADC_ENV, "") or "").strip()
     account = (service_account or get_env(VERTEX_SANDBOX_SA_ENV, "") or "").strip()
-    if not account:
+    if adc_path and not os.path.isfile(adc_path):
         raise ConfigError(
-            "a sandboxed Vertex run needs a service account to impersonate for its model "
-            f"credential; set {VERTEX_SANDBOX_SA_ENV} to an aiplatform.user-only service "
-            "account the host identity can mint tokens for "
-            "(roles/iam.serviceAccountTokenCreator on that account)"
+            f"{VERTEX_SANDBOX_ADC_ENV}={adc_path!r} is not a readable file on the host; "
+            "it must point at an Application Default Credentials JSON file"
+        )
+    if not adc_path and not account:
+        raise ConfigError(
+            "a sandboxed Vertex run needs a model credential the host can mint; set "
+            f"{VERTEX_SANDBOX_SA_ENV} to an aiplatform.user-only service account the host "
+            "identity can mint tokens for (roles/iam.serviceAccountTokenCreator on that "
+            f"account), or {VERTEX_SANDBOX_ADC_ENV} to an ADC file whose identity may call "
+            "the model"
         )
     if not (project or "").strip():
         raise ConfigError(
             "a sandboxed Vertex run needs GOOGLE_CLOUD_PROJECT (or GCP_PROJECT) set; the "
             "metadata emulator serves it to the agent's SDK as the run's project"
         )
-    emulator = _get_emulator(account, project.strip())
+    emulator = _get_emulator(account, project.strip(), adc_path=adc_path or None)
     return {
         # Both spellings: the Python auth library reads GCE_METADATA_HOST for
         # the base URL and GCE_METADATA_IP for its reachability probe; the
@@ -377,13 +400,15 @@ def _vertex_metadata_env(*, project: str | None, service_account: str | None) ->
     }
 
 
-def _get_emulator(service_account: str, project: str) -> _VertexMetadataEmulator:
+def _get_emulator(
+    service_account: str, project: str, *, adc_path: str | None = None
+) -> _VertexMetadataEmulator:
     """Return the process-wide emulator for this identity, starting it if needed."""
-    key = (service_account, project)
+    key = (adc_path or service_account, project)
     with _EMULATORS_LOCK:
         emulator = _EMULATORS.get(key)
         if emulator is None:
-            emulator = _VertexMetadataEmulator(service_account, project)
+            emulator = _VertexMetadataEmulator(service_account, project, adc_path=adc_path)
             emulator.start()
             _EMULATORS[key] = emulator
     return emulator
@@ -399,8 +424,9 @@ class _VertexMetadataEmulator:
     a credential at all.
     """
 
-    def __init__(self, service_account: str, project: str) -> None:
-        self.service_account = service_account
+    def __init__(self, service_account: str, project: str, *, adc_path: str | None = None) -> None:
+        self.adc_path = adc_path
+        self.service_account = _ADC_IDENTITY if adc_path else service_account
         self.project = project
         self._lock = threading.Lock()
         self._token = ""
@@ -428,10 +454,11 @@ class _VertexMetadataEmulator:
             daemon=True,
         ).start()
         _log.info(
-            "serving a Vertex metadata emulator on port %s for the sandboxed agent; "
-            "impersonating %s in project %s",
+            "serving a Vertex metadata emulator on port %s for the sandboxed agent; %s in project %s",
             self.port,
-            self.service_account,
+            f"minting from ADC file {self.adc_path}"
+            if self.adc_path
+            else f"impersonating {self.service_account}",
             self.project,
         )
 
@@ -460,6 +487,20 @@ class _VertexMetadataEmulator:
         the rest of the benchmark reaches GCP
         (:mod:`devops_bench.providers.gcp`, the antigravity harness).
         """
+        if self.adc_path:
+            completed = run(
+                ["gcloud", "auth", "application-default", "print-access-token"],
+                extra_env={"GOOGLE_APPLICATION_CREDENTIALS": self.adc_path},
+                check=False,
+            )
+            token = (completed.stdout or "").strip()
+            if completed.returncode != 0 or not token:
+                raise ConfigError(
+                    f"could not mint a Vertex access token from the ADC file {self.adc_path}: "
+                    f"gcloud exited {completed.returncode}: "
+                    f"{(completed.stderr or '').strip() or '<no stderr>'}"
+                )
+            return token
         completed = run(
             [
                 "gcloud",
