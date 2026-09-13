@@ -341,7 +341,7 @@ matrix_dispatch() {
     echo "export AGENT_TIMEOUT_SEC='${AGENT_TIMEOUT_SEC}'"
     # Per-arm knobs forwarded only when set locally, so one launch can differ
     # from the bastion's secrets.env without editing it.
-    for v in BENCH_AGENT_SANDBOX BENCH_SANDBOX_IMAGE BENCH_VERIFY_TOTAL_BUDGET_SEC AGENT_MODEL_EFFORT AGENT_EXTRA_FLAGS; do
+    for v in BENCH_AGENT_SANDBOX BENCH_SANDBOX_IMAGE BENCH_VERTEX_SANDBOX_SA BENCH_VERIFY_TOTAL_BUDGET_SEC AGENT_MODEL_EFFORT AGENT_EXTRA_FLAGS; do
       [ -n "${!v:-}" ] && echo "export ${v}='${!v}'"
     done
     echo "export BENCH_PARALLEL=true"
