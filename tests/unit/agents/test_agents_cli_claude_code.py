@@ -909,6 +909,29 @@ def test_execute_closes_child_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured["input"] == ""
 
 
+def test_execute_sandboxed_runs_the_container_binary_and_leaves_stdin_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host binary path means nothing inside the image, and the sandbox
+    executor refuses an explicit ``input=``."""
+    from devops_bench.agents.sandbox import SandboxSpec
+
+    captured: dict = {}
+
+    def fake_run_agent_cmd(self, argv, **kwargs):  # noqa: ANN001, ANN202 - test double
+        captured["argv"] = list(argv)
+        captured["input"] = kwargs.get("input")
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(claude_mod.ClaudeCodeAgent, "run_agent_cmd", fake_run_agent_cmd)
+    monkeypatch.setattr(claude_mod, "_claude_version", lambda target: (2, 1, 0))
+    cfg = AgentConfig(target="/home/op/.local/bin/claude", sandbox=SandboxSpec(image="img"))
+    ClaudeCodeAgent(cfg).run("p")
+
+    assert captured["argv"][0] == "claude"
+    assert captured["input"] is None
+
+
 def test_execute_wires_extra_env_into_subprocess_call(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 

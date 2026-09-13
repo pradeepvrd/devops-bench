@@ -92,6 +92,13 @@ _STDERR_TAIL_CHARS = 2000
 # where it would displace the real cause).
 _CLOSED_STDIN = ""
 
+# The image ships its own claude on PATH; the host binary path is meaningless
+# inside the container. Same idiom as antigravity's _CONTAINER_AGY_BIN and
+# openclaw's _CONTAINER_OC_BIN — without it an absolute AGENT_TARGET (or the
+# ~/.local/bin default) crosses the boundary verbatim in argv[0] and fails to
+# exec.
+_CONTAINER_CLAUDE_BIN = "claude"
+
 
 def _stderr_tail(stderr: str | None) -> str:
     """Stripped last :data:`_STDERR_TAIL_CHARS` characters of ``stderr``."""
@@ -350,7 +357,7 @@ class ClaudeCodeAgent(AgentHarness):
                     )
 
             argv = _build_argv(
-                target,
+                _CONTAINER_CLAUDE_BIN if self.config.sandbox is not None else target,
                 prompt,
                 model=self.config.model,
                 max_turns=self.config.max_turns,
