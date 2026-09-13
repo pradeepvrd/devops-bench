@@ -368,7 +368,10 @@ class ClaudeCodeAgent(AgentHarness):
                         cwd=workdir,
                         check=False,
                         timeout=self.config.timeout_sec,
-                        input=_CLOSED_STDIN,
+                        # The sandbox runs the agent without stdin already and
+                        # refuses an explicit input=; closing it here is only
+                        # needed on the host path.
+                        input=None if self.config.sandbox is not None else _CLOSED_STDIN,
                         host_run=run,
                     )
                 except SubprocessError as exc:
