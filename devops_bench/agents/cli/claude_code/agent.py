@@ -63,7 +63,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 )
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.config import get_bool
-from devops_bench.core.model_providers import resolve_provider
+from devops_bench.core.model_providers import resolve_provider, sandbox_credential_env
 from devops_bench.core.subprocess import run
 
 __all__ = ["ClaudeCodeAgent"]
@@ -225,6 +225,13 @@ def _build_env(config: AgentConfig, *, config_dir: str | None) -> dict[str, str]
         # only fall back to "global" when neither is set (never clobber it).
         region = os.environ.get("GCP_VERTEX_LOCATION") or os.environ.get("CLOUD_ML_REGION")
         overlay["CLOUD_ML_REGION"] = region or "global"
+        # Vertex is keyless: the CLI's auth library looks for ADC, which the
+        # sandbox deliberately withholds. Inside the boundary it falls back to
+        # the GCE metadata path, so point that at the host-side emulator serving
+        # a scoped, short-lived token. Unsandboxed runs never call this, so the
+        # flag-off path is unchanged.
+        if config.sandbox is not None:
+            overlay.update(sandbox_credential_env(spec, project=project))
     elif spec.backend == "bedrock":
         overlay["CLAUDE_CODE_USE_BEDROCK"] = "1"
     if config_dir is not None:

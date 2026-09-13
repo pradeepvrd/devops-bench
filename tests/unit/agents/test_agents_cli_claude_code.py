@@ -756,6 +756,51 @@ def test_build_env_keyless_vertex_sets_switch_and_maps_project_region(
     assert env["CLOUD_ML_REGION"] == "us-east5"
     # Keyless: no API-key var written even absent an explicit api_key.
     assert "ANTHROPIC_API_KEY" not in env
+    # Unsandboxed: ADC is ambient, so no emulator vars are injected.
+    assert not {"GCE_METADATA_HOST", "GCE_METADATA_IP", "METADATA_SERVER_DETECTION"} & env.keys()
+
+
+def test_build_env_sandboxed_vertex_injects_the_metadata_emulator_vars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inside the sandbox there is no ADC, so the backend's mint-and-inject
+    # recipe supplies the credential, scoped to the model project.
+    from devops_bench.agents.sandbox import SandboxSpec
+
+    monkeypatch.setenv("GCP_PROJECT_ID", "proj-42")
+    seen: dict = {}
+
+    def fake_recipe(spec, *, project=None, **kwargs):
+        seen["backend"] = spec.backend
+        seen["project"] = project
+        return {"GCE_METADATA_HOST": "host.docker.internal:41235"}
+
+    monkeypatch.setattr(claude_mod, "sandbox_credential_env", fake_recipe)
+    cfg = AgentConfig(provider="anthropic-vertex", sandbox=SandboxSpec(image="img"))
+    env = _build_env(cfg, config_dir=None)
+
+    assert seen == {"backend": "vertex", "project": "proj-42"}
+    assert env["GCE_METADATA_HOST"] == "host.docker.internal:41235"
+    # The recipe rides alongside the routing vars, it does not replace them.
+    assert env["CLAUDE_CODE_USE_VERTEX"] == "1"
+    assert env["ANTHROPIC_VERTEX_PROJECT_ID"] == "proj-42"
+
+
+def test_build_env_sandboxed_keyed_anthropic_asks_for_no_model_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A key-based provider carries its own credential across the boundary.
+    from devops_bench.agents.sandbox import SandboxSpec
+
+    monkeypatch.setattr(
+        claude_mod,
+        "sandbox_credential_env",
+        lambda *a, **k: pytest.fail("sandbox_credential_env called for a key-based provider"),
+    )
+    env = _build_env(
+        AgentConfig(api_key="sk-abc", sandbox=SandboxSpec(image="img")), config_dir=None
+    )
+    assert env["ANTHROPIC_API_KEY"] == "sk-abc"
 
 
 def test_build_env_vertex_region_defaults_to_global(monkeypatch: pytest.MonkeyPatch) -> None:
