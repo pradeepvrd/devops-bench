@@ -67,11 +67,34 @@ resource "kind_cluster" "c2" {
 # Outside-the-cluster setup: build the Istio multi-primary federation across both
 # clusters and inject the mTLS fault. Runs during `tofu apply`, before the agent.
 resource "null_resource" "setup" {
+  # Every input the setup depends on, not just the cluster names.
+  #
+  # Keyed on the names alone, an edit to scripts/setup.sh or to any manifest it
+  # applies leaves this resource unchanged, so a re-apply skips the whole
+  # federation build and both injected faults. The fixture change lands in the
+  # repo but never reaches the clusters and the task quietly runs its previous
+  # shape — a silent wrong-fixture failure, which is worse than a loud one.
+  #
+  # The CA certificates are the replacement sentinels: a cluster torn down and
+  # rebuilt under the same name gets a fresh CA, whereas `name` (and `id`, which
+  # the provider derives from it) would not move.
+  #
+  # kubeconfig_c2 and peer_kubeconfig are load-bearing beyond change detection —
+  # the destroy provisioner below reads them off `self.triggers`, which is the
+  # only state available once the resource is being destroyed.
   triggers = {
     c1              = kind_cluster.c1.name
     c2              = kind_cluster.c2.name
     kubeconfig_c2   = pathexpand("${var.kubeconfig_path}-c2")
     peer_kubeconfig = local.peer_kubeconfig
+    c1_instance     = sha256(kind_cluster.c1.cluster_ca_certificate)
+    c2_instance     = sha256(kind_cluster.c2.cluster_ca_certificate)
+    istio_version   = var.istio_version
+    setup_script    = filesha256("${path.module}/scripts/setup.sh")
+    manifests = sha256(join("", [
+      for f in sort(tolist(fileset("${path.module}/manifests", "**"))) :
+      "${f}:${filesha256("${path.module}/manifests/${f}")}"
+    ]))
   }
 
   provisioner "local-exec" {
