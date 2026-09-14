@@ -264,6 +264,51 @@ real but thin for a run that never federated anything. Promoting the entry to
 `catastrophic` is a one-line change if the suite would rather take the
 false-positive risk than the false-negative one.
 
+## Measured difficulty
+
+**The second fault did not make this task harder.** Three `gemini-3.7-flash` runs
+(2026-09-14, unsandboxed, HOME quarantined) all scored **OutcomeScore 1.0** with
+8/8 entries passing — 30, 32 and 33 steps, 149–310 s. No variance. The same
+result the single-fault version produced, and the same result two `claude-opus-5`
+runs produced before it.
+
+The design bet on one specific behaviour: that an agent would fix the obvious
+fault and declare victory without re-testing. It bet wrong. All three runs
+re-probed the call immediately after the `DestinationRule` fix, read the changed
+symptom correctly, went straight to the peer cluster's `AuthorizationPolicy`, and
+granted the client rather than removing the control. That is the ideal path, and
+none of them needed to be nudged onto it.
+
+Worth recording, because the trajectories were audited and are clean — no run
+touched `task.yaml`, the fixture tree, or `BENCH_RUN_DIR`. This was not a scoring
+artifact or a leak; the model simply solved it.
+
+Two side results:
+
+- Both branches of the `any` wrapper on
+  `client-no-longer-forces-plaintext-to-the-backend` are now exercised on live
+  clusters. The earlier opus runs deleted the `DestinationRule` (branch one);
+  these set `tls.mode: ISTIO_MUTUAL` instead (branch two).
+- The masking mechanism itself works exactly as designed — the agents' own
+  reports quote the T0 symptom (`503 no healthy upstream`) and the post-fix
+  symptom (`403 RBAC: access denied`) as two distinct failures. Fault 2 really is
+  invisible until fault 1 is fixed. It just is not an obstacle.
+
+**The lesson for the next revision.** Adding depth — another fault in the chain —
+buys investigation steps, not difficulty. What actually produced a sub-1.0 score
+on `greenops-consolidation` was a *tradeoff*: an action that looks correct and
+violates a constraint, so the agent has to choose rather than enumerate. A third
+fault here would most likely score 1.0 again.
+
+### A note for whoever adds sandboxing
+
+This task needs `requires_unsandboxed: true` the day `feat/sandbox-all-harnesses`
+lands. The sandboxed kubeconfig holds exactly one cluster, and the whole premise
+here is two — the prompt names both contexts. A sandboxed run would score 0.0 for
+infrastructure reasons and read like a total agent failure, the way
+`multi-region-failover` did. The field does not exist in this tree yet, which is
+why the declaration is not already in `task.yaml`.
+
 ## How it works
 
 `tf/prebuilt/mesh-federation-kind` creates the two kind clusters (the second into
@@ -355,16 +400,25 @@ export CLUSTER_NAME="mesh-kind"        # cluster-2 becomes mesh-kind-peer
 export NAMESPACE="sample"
 export PROJECT_ID="local-kind"         # required by the harness validator; any dummy string for local runs
 
-export BENCH_AGENT_TYPE="cli"
+# The agent type is the harness's registered key, NOT the family. `cli` is not
+# one: `AGENTS.register` declares api / claude / antigravity / gemini / openclaw.
+export BENCH_AGENT_TYPE="openclaw"
 export AGENT_TARGET="oc"
-export AGENT_PROVIDER="google"
-export AGENT_MODEL="gemini-3.1-pro-preview"
-export AGENT_API_KEY="<your-key>"
-export JUDGE_PROVIDER="google"
-export JUDGE_MODEL="gemini-3.1-pro-preview"
-export JUDGE_API_KEY="<your-key>"
+export AGENT_PROVIDER="google-vertex"
+export AGENT_MODEL="gemini-3.7-flash"
+export AGENT_API_KEY="gcp-vertex-credentials"   # a marker; ADC supplies the token
+export GOOGLE_CLOUD_PROJECT="<project>"
+export GOOGLE_CLOUD_LOCATION="global"           # not a region — the model is published globally
 
-python -m devops_bench tasks/common/mesh-federation/task.yaml
+export JUDGE_PROVIDER="google-vertex"
+export JUDGE_MODEL="gemini-3.7-flash"
+export GCP_PROJECT_ID="<project>"               # google-vertex judge reads this, not JUDGE_API_KEY
+export GCP_VERTEX_LOCATION="global"
+
+export AGENT_TIMEOUT_SEC=3600                   # heaviest task in the suite
+
+python -m devops_bench tasks/common/mesh-federation/task.yaml \
+  --project local-kind --cluster mesh-kind
 ```
 
 ## Verify the environment manually (optional smoke test)

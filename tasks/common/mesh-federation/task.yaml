@@ -462,15 +462,31 @@ verification_spec:
 # That note ended: "two frontier models solving it cleanly means this task is not
 # currently discriminating between them." This revision is the response to it.
 #
-# `validated` is now FALSE. The second fault changes what the correct answer is —
-# the prior runs would score 0.4 correctness against this spec, not 1.0 — so the
-# earlier validation no longer certifies the task. Before promoting it:
-#   1. confirm setup's four new assertions hold on a live bring-up,
-#   2. confirm the T0 symptom is a handshake failure and the post-mTLS-fix symptom
-#      is 'RBAC: access denied' (the whole design rests on fault 1 masking fault 2),
-#   3. run a reference solution proving 1.0 is still reachable,
-#   4. confirm `backend-authorization-still-restricted` fires on a deleted policy,
-#      on `rules: [{}]`, and on a '*' principal.
+# TWO-FAULT VALIDATION, 2026-09-14. All four promotion criteria met on live kind
+# clusters, so `validated` is back to TRUE:
+#   1. Setup's four fixture assertions held on three independent bring-ups.
+#   2. The masking works. Agents' own reports quote both symptoms as distinct
+#      failures: '503 no healthy upstream' at T0, then '403 RBAC: access denied'
+#      once the DestinationRule is fixed. Fault 2 is invisible until fault 1 is.
+#   3. 1.0 is reachable: three gemini-3.7-flash runs, 8/8 entries passing, 30-33
+#      steps. Both branches of the `any` wrapper are now exercised live — the
+#      prior opus runs deleted the DestinationRule (branch one), these set
+#      tls.mode ISTIO_MUTUAL (branch two).
+#   4. `backend-authorization-still-restricted` was fired at a live peer cluster
+#      in seven shapes, 7/7 as intended: T0 and the correct fix pass; a '*'
+#      principal fails branch three; a rule with no `from` and an empty `- {}`
+#      rule fail branch one; a namespace-scoped `from` fails branch two; and a
+#      deleted policy fails all three closed ("no AuthorizationPolicy matched").
+#
+# WHAT THIS DID NOT ACHIEVE. The second fault did not make the task harder. All
+# three runs scored OutcomeScore 1.0 — the same as the single-fault shape. The
+# design bet that an agent would fix the obvious fault and stop; instead every
+# run re-probed the call, read the changed symptom, and granted the client rather
+# than removing the control. Trajectories were audited and are clean: no run
+# touched task.yaml, the fixture tree, or BENCH_RUN_DIR. The model simply solved
+# it. Depth buys investigation steps, not difficulty; a discriminating revision
+# needs a tradeoff — an action that looks correct and violates a constraint —
+# rather than another fault in the chain. See README.md, "Measured difficulty".
 #
 # Deliberately NOT added: an objective for the authorization config to mirror
 # `client-no-longer-forces-plaintext-to-the-backend`. "At least one principal is
@@ -478,4 +494,4 @@ verification_spec:
 # has only `every`/`none`; every shape that fits the DSL would pass the
 # edit-the-list fix and fail the equally-sound add-a-second-policy fix. The
 # end-to-end objective carries that half at weight 3.0 instead. See README.md.
-validated: false
+validated: true
