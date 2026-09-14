@@ -58,6 +58,15 @@ kubectl label node "${WORKERS[0]}" "${WORKERS[1]}" \
 kubectl label node "${WORKERS[2]}" "${WORKERS[3]}" \
   node.kubernetes.io/instance-type=n1-standard-4 --overwrite
 
+# The last worker also carries the ledger's local storage. The ledger Deployment
+# selects on this label rather than on a node name, which keeps the manifest free
+# of the run-scoped cluster name while still landing deterministically. Putting it
+# on a HIGH-DRAW node is the point: it makes the carbon-optimal move (retire both
+# n1 workers) unreachable, because the ledger's PodDisruptionBudget allows zero
+# disruptions and its nodeSelector gives it nowhere else to go.
+echo "==> Labelling the ledger's storage node..."
+kubectl label node "${WORKERS[3]}" storage-tier=local-ssd --overwrite
+
 # Every worker must be schedulable BEFORE the fleet is applied. `kind_cluster`
 # returns once the API server answers, but workers can still be NotReady while
 # their CNI settles — and a pod placed while a node is NotReady is never
@@ -112,6 +121,39 @@ for node in "${WORKERS[@]}"; do
     exit 1
   fi
 done
+
+# The whole difficulty of the task rests on the ledger sitting on a high-draw node
+# and being un-evictable there. If it landed anywhere else the fixture is a
+# different, easier task — the agent could then retire both n1 workers cleanly and
+# the judgement call disappears. Assert it rather than trust the nodeSelector.
+echo "==> Asserting the ledger is pinned to the expected high-draw worker..."
+LEDGER_NODE="$(
+  kubectl -n workloads get pods -l app=ledger \
+    -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true
+)"
+if [[ "${LEDGER_NODE}" != "${WORKERS[3]}" ]]; then
+  echo "ERROR: the ledger pod is on '${LEDGER_NODE:-<unscheduled>}', expected" >&2
+  echo "       '${WORKERS[3]}'. The un-drainable-node premise did not materialize," >&2
+  echo "       so this fixture is not the task it claims to be. Refusing." >&2
+  kubectl -n workloads get pods -l app=ledger -o wide >&2
+  kubectl get nodes -L node.kubernetes.io/instance-type -L storage-tier >&2
+  exit 1
+fi
+echo "    ledger pinned to ${LEDGER_NODE}"
+
+# A budget that permits a disruption is a budget that does not block the drain.
+ALLOWED="$(
+  kubectl -n workloads get pdb ledger \
+    -o jsonpath='{.status.disruptionsAllowed}' 2>/dev/null || true
+)"
+if [[ "${ALLOWED}" != "0" ]]; then
+  echo "ERROR: the ledger PodDisruptionBudget reports disruptionsAllowed=" >&2
+  echo "       '${ALLOWED:-<unset>}', expected 0. The node the ledger sits on would" >&2
+  echo "       drain cleanly and the task's central constraint would not exist." >&2
+  kubectl -n workloads get pdb -o wide >&2
+  exit 1
+fi
+echo "    ledger PDB allows 0 disruptions"
 
 echo "==> Setup complete."
 echo "    Node pools:    kubectl get nodes -L node.kubernetes.io/instance-type"
