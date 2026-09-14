@@ -82,8 +82,25 @@ resource "local_file" "carbon_report" {
 # cluster at plan time), so a thin script remains. Runs during `tofu apply`,
 # before the agent starts.
 resource "null_resource" "setup" {
+  # Every input the setup depends on, not just the cluster name.
+  #
+  # Keyed on the name alone, an edit to scripts/setup.sh or to any manifest it
+  # applies leaves this resource unchanged, so a re-apply skips the labelling,
+  # the fleet, and the assertions entirely — the fixture change lands in the repo
+  # but never reaches the cluster, and the task quietly runs its previous shape.
+  # That is a silent wrong-fixture failure, which is worse than a loud one.
+  #
+  # The CA certificate is the replacement sentinel: a cluster torn down and
+  # rebuilt under the same name gets a fresh CA, whereas `name` (and `id`, which
+  # the provider derives from it) would not move.
   triggers = {
-    cluster = kind_cluster.default.name
+    cluster          = kind_cluster.default.name
+    cluster_instance = sha256(kind_cluster.default.cluster_ca_certificate)
+    setup_script     = filesha256("${path.module}/scripts/setup.sh")
+    manifests = sha256(join("", [
+      for f in sort(tolist(fileset("${path.module}/manifests", "**"))) :
+      "${f}:${filesha256("${path.module}/manifests/${f}")}"
+    ]))
   }
 
   provisioner "local-exec" {
