@@ -1180,7 +1180,12 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     provider = _StubProvider()
 
     def fake_provision(
-        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
+        got_plan: Any,
+        dest_dir: Path,
+        *,
+        token_ttl_sec: int,
+        pod_security: str,
+        quota_writes: bool,
     ) -> Path:
         assert got_plan is plan
         assert dest_dir == tmp_path / "creds"
@@ -1188,6 +1193,8 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
         # must outlast the run it is minted for.
         assert token_ttl_sec == 1500
         assert pod_security == "baseline"
+        # The task's quota decision reaches provisioning; granted by default.
+        assert quota_writes is True
         return kubeconfig
 
     plan_requests: list[tuple[Any, str]] = []
@@ -1302,6 +1309,7 @@ def test_run_one_tears_down_sandbox_credentials_in_its_finally(
             cluster_info: Any,
             provider: Any,
             pod_security: str,
+            quota_writes: bool = True,
         ) -> Any:
             (workspace_path / "home").mkdir(parents=True, exist_ok=True)
             return replace(

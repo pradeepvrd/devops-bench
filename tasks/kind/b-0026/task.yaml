@@ -8,6 +8,10 @@ task_id: 26
 # do not bump it. Lets a run record which task revision it was scored against.
 task_version: 1
 name: "The fix that can't take the shortcut: a quota-stranded deploy where the operator cannot touch the quota"
+# The premise is a credential that cannot change the quota, so the sandboxed
+# agent's quota grant is withheld here; the stack's own namespaced Role is the
+# access the prompt describes.
+agent_quota_writes: false
 infrastructure:
   # deployer: tofu -- the generated stack under out/emitted/<id>/stack/ is meant to be
   # copied into the bench repo's tf/prebuilt/<stack> (see compiler/stack.py); the

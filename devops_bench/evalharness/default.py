@@ -1320,6 +1320,7 @@ class DefaultEvalHarness(Harness):
                     replace(cluster_info, name=active_cluster_name),
                     deployer.provider,
                     task.agent_pod_security,
+                    task.agent_quota_writes,
                 )
                 self._active_sandbox_spec = completed_spec
                 self._inventory_sandbox_home(task.name, workspace_path / "home")
@@ -1603,6 +1604,7 @@ class DefaultEvalHarness(Harness):
         cluster_info: ClusterInfo,
         provider: Provider | None,
         pod_security: str,
+        quota_writes: bool = True,
     ) -> agent_sandbox.SandboxSpec:
         """Complete the skeletal sandbox spec for one provisioned task.
 
@@ -1629,6 +1631,7 @@ class DefaultEvalHarness(Harness):
                 to the deployer's own; also the fixture-discovery token.
             provider: The deployer's provider, or ``None`` when it has none.
             pod_security: The task's declared ``agent_pod_security`` level.
+            quota_writes: The task's declared ``agent_quota_writes``.
 
         Returns:
             The completed :class:`~devops_bench.agents.sandbox.SandboxSpec`.
@@ -1646,6 +1649,7 @@ class DefaultEvalHarness(Harness):
             creds_dir,
             token_ttl_sec=agent_credentials.token_ttl_for(self._agent_config.timeout_sec),
             pod_security=pod_security,
+            quota_writes=quota_writes,
         )
         try:
             # A task whose stack declared an agent cloud identity gets a
