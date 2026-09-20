@@ -44,6 +44,14 @@ variable "namespace" {
   type        = string
   description = "Kubernetes Namespace to deploy secret rotation test app"
   default     = "secret-rotation"
+
+  validation {
+    condition = (
+      length(var.namespace) <= 17 &&
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.namespace))
+    )
+    error_message = "namespace must be an RFC 1123 label of 1 to 17 characters: it is embedded in service account IDs that GCP caps at 30."
+  }
 }
 
 variable "token_creator_member" {

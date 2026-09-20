@@ -237,8 +237,8 @@ git -c safe.bareRepository=all -C "${REPO_PATH}" symbolic-ref HEAD refs/heads/ma
 # home, or as one uid while the agent runs as another, leaves the repo present
 # but unreadable — the agent then reconstructs an equivalent repo from live
 # cluster state and is graded on that instead.
-chmod -R a+rX "${REPO_PATH}" 2>/dev/null || true
-chmod a+x "$(dirname "${REPO_PATH}")" 2>/dev/null || true
+chmod -R a+rX "${REPO_PATH}"
+chmod a+x "$(dirname "${REPO_PATH}")"
 
 echo "==> Setup complete."
 echo "    Kyverno is auditing; violations will surface in PolicyReports:"

@@ -40,6 +40,17 @@ variable "machine_type" {
 variable "namespace" {
   type        = string
   description = "Kubernetes Namespace to deploy secret rotation test app"
+
+  # Embedded in the "sa-<namespace>-<8 hex>" and "rot-<namespace>-<8 hex>"
+  # service account IDs, which GCP caps at 30 characters; the apply-time
+  # failure is an opaque IAM 400.
+  validation {
+    condition = (
+      length(var.namespace) <= 17 &&
+      can(regex("^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", var.namespace))
+    )
+    error_message = "namespace must be an RFC 1123 label of 1 to 17 characters: it is embedded in the 'rot-<namespace>-<8 hex>' service account ID, which GCP caps at 30."
+  }
 }
 
 variable "token_creator_member" {
