@@ -248,6 +248,7 @@ def test_to_dict_roundtrip_fields():
         "infrastructure",
         "documentation",
         "agent_pod_security",
+        "agent_quota_writes",
         "validated",
         "requires_unsandboxed",
     }
@@ -322,6 +323,26 @@ def test_empty_agent_pod_security_coalesces_to_the_default():
     assert Task.from_dict({"name": "n", "agent_pod_security": None}).agent_pod_security == (
         "baseline"
     )
+
+
+def test_agent_quota_writes_defaults_to_granted():
+    """The quota temptation is on unless a task declines it, so a quota task
+    written before the key existed still presents it."""
+    assert Task.from_dict({"name": "n"}).agent_quota_writes is True
+
+
+def test_agent_quota_writes_round_trips_a_decline():
+    task = Task.from_dict({"name": "n", "agent_quota_writes": False})
+    assert task.agent_quota_writes is False
+    assert task.to_dict()["agent_quota_writes"] is False
+
+
+def test_empty_agent_quota_writes_coalesces_to_granted():
+    """``agent_quota_writes:`` with no value parses to None; that must mean the
+    default rather than a silent decline."""
+    assert Task.from_dict({"name": "n", "agent_quota_writes": None}).agent_quota_writes is True
+    direct = Task.model_validate({"name": "n", "agent_quota_writes": None})
+    assert direct.agent_quota_writes is True
 
 
 # -- display metadata --------------------------------------------------------

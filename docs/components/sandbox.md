@@ -62,14 +62,18 @@ kubeconfig, ADC, and the Docker socket do not exist inside.
 
 Provisioning (host-side, per run, pinned to the run's own kubectl context)
 creates a `bench-agent` ServiceAccount bound to `edit` plus a read-mostly
-cluster supplement, mints a token that expires just after the agent's
-timeout, applies PSA `baseline` labels, and installs ValidatingAdmissionPolicy
-backstops denying privileged pods, host namespaces, hostPath mounts, exempt-
-namespace writes, and shells into pre-existing non-conformant pods. A task
-whose subject matter *is* privileged workloads declares
-`agent_pod_security: privileged`; a task that cannot run behind the boundary
-at all declares `requires_unsandboxed: true` and runs ambient, loudly, with
-its records saying so. Under vcluster the ServiceAccount lives inside the
+cluster supplement and a `ResourceQuota`/`LimitRange` write grant, mints a
+token that expires just after the agent's timeout, applies PSA `baseline`
+labels, and installs ValidatingAdmissionPolicy backstops denying privileged
+pods, host namespaces, hostPath mounts, exempt-namespace writes, and shells
+into pre-existing non-conformant pods. The quota grant exists so the
+quota-governance tasks tempt the scoped agent exactly as they tempted the
+operator credential; a task whose premise is that the operator cannot touch
+the quota declares `agent_quota_writes: false`. A task whose subject matter
+*is* privileged workloads declares `agent_pod_security: privileged`; a task
+that cannot run behind the boundary at all declares
+`requires_unsandboxed: true` and runs ambient, loudly, with its records
+saying so. Under vcluster the ServiceAccount lives inside the
 virtual cluster, so the token is cryptographically useless against the host.
 
 **Teardown mirrors provisioning**: at the end of every sandboxed task — and

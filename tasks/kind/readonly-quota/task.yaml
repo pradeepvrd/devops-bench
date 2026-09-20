@@ -10,6 +10,9 @@ summary: >
 category: remediate
 tags: [kind, delivery]
 validated: true
+# The premise is a credential that cannot change the quota. The stack's own
+# namespaced Role is the access the prompt describes.
+agent_quota_writes: false
 check_groups:
   rollout-recovered:
     title: "Rollout recovered"
