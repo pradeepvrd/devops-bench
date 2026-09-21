@@ -1,0 +1,103 @@
+task_id: eh1-0043
+name: eh1-0043
+prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
+
+  During a synthetic fault drill in the storefront namespace, checkout reports an active ~8% failure rate,
+  but the Prometheus alert CheckoutHighErrorRate remains completely silent (0 firing alerts) despite its
+  5% (> 0.05) threshold.
+
+  Diagnose why CheckoutHighErrorRate fails to fire and restore the alerting and telemetry pipeline in
+  storefront so CheckoutHighErrorRate reliably fires under the ongoing fault condition and metrics accurately
+  reflect true traffic rates. Leave neighboring telemetry scrapes healthy.
+
+  Policy: Do not delete namespaces. Do not recreate or delete the otel-collector or prometheus Deployments.
+  Report what you changed and why.'
+expected_output: 'critical requirements:
+
+  - Diagnose why PaymentHighErrorRate fails to fire and checkout request rates are inflated by 2x in Prometheus.
+
+  - Fix the OpenTelemetry Collector spanmetrics/pipeline configuration so rpc.grpc.status_code is included
+  in span metric dimensions and duplicate collector scrape/pipeline inflation is eliminated.
+
+  - Reconcile the Prometheus alert rule / join query (accounting for job label differences between span
+  metrics and target_info via ignoring(job) or label alignment) so PaymentHighErrorRate fires accurately
+  under elevated payment errors while preserving neighbor telemetry and existing deployments.'
+infrastructure:
+  deployer: tofu
+  stack: prebuilt/eh1-0043
+  provider: kind
+  teardown: true
+  variables: {}
+agent_rbac: task
+verification_spec:
+- name: neighbor-telemetry-healthy
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: http_probe
+    url: http://prometheus.storefront.svc.cluster.local:9090/api/v1/query?query=up%7Bjob%3D%22opentelemetry-collector%22%7D
+    expect_status: 200
+    expect_body_matches: (?s)"status":\s*"success".*"value":\s*\[\s*\d+(\.\d+)?\s*,\s*"1"\s*\]
+    namespace: storefront
+    probe_timeout: 5
+- name: collector-healthy
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: pod_healthy
+    selector: app.kubernetes.io/name=opentelemetry-collector
+    namespace: storefront
+- name: prometheus-healthy
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: pod_healthy
+    selector: app.kubernetes.io/name=prometheus
+    namespace: storefront
+- name: collector-not-recreated
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: identity_preserved
+    kind: Deployment
+    resource_name: otel-collector
+    namespace: storefront
+- name: prometheus-not-recreated
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: identity_preserved
+    kind: Deployment
+    resource_name: prometheus
+    namespace: storefront
+- name: checkout-alert-firing
+  role: objective
+  mode: converge
+  check:
+    type: http_probe
+    url: http://prometheus.storefront.svc.cluster.local:9090/api/v1/alerts
+    expect_status: 200
+    expect_body_matches: (?s)"alertname":\s*"CheckoutHighErrorRate".*"state":\s*"firing"
+    namespace: storefront
+    probe_timeout: 5
+- name: checkout-traffic-rate-accurate
+  role: objective
+  mode: converge
+  check:
+    type: http_probe
+    url: http://prometheus.storefront.svc.cluster.local:9090/api/v1/query?query=sum(rate(checkout_requests_total%5B2m%5D))
+    expect_status: 200
+    expect_body_matches: (?s)"status":\s*"success".*"value":\s*\[\s*\d+(\.\d+)?\s*,\s*"(1\.[0-9]+|2\.[0-7][0-9]*)"\s*\]
+    namespace: storefront
+    probe_timeout: 5
+validated: true

@@ -1,0 +1,144 @@
+task_id: eh1-0003
+name: eh1-0003
+prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
+
+
+  Investigate suspected undercounting in the minute-level order rollups. Identify what is being omitted,
+  correct the ongoing problem, and explain the impact on previously emitted results.
+
+
+  Keep the streaming service available and preserve existing raw events and processing state.'
+expected_output: '- Compare event_time with Kafka record timestamps and inspect the core SQL window and
+  watermark definitions.
+
+  - Read the traffic-profile change record and generator startup behavior; restore late_fraction 0 and
+  late_max_seconds 1 on the owning ConfigMap and restart the Deployment.
+
+  - Verify freshly produced records no longer have injected event-time delays, with the core job running
+  and the 30-second watermark retained.
+
+  - Explain why restoring future input cannot retroactively repair already-emitted historical aggregates;
+  identify raw Kafka/archive data as recovery input without claiming an unperformed backfill.'
+infrastructure:
+  deployer: tofu
+  stack: prebuilt/eh1-0003
+  provider: kind
+  teardown: true
+  variables: {}
+agent_rbac: task
+verification_spec:
+- name: watermark-budget-preserved
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  check:
+    type: all
+    checks:
+    - type: resource_property
+      kind: flinksessionjob
+      resource_name: core
+      namespace: streaming
+      path: spec.job.args
+      op: eq
+      value:
+      - /sql-jobs/job.sql
+    - type: resource_property
+      kind: configmap
+      resource_name: flink-sql-scripts
+      namespace: streaming
+      path: data['job.sql']
+      op: contains
+      value: WATERMARK FOR event_ts AS event_ts - INTERVAL '30' SECOND
+- name: traffic-engine-available
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: traffic-engine
+    namespace: streaming
+    path: status.availableReplicas
+    op: gte
+    value: 1
+- name: core-job-running
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  check:
+    type: resource_property
+    kind: flinksessionjob
+    resource_name: core
+    namespace: streaming
+    path: status.jobStatus.state
+    op: eq
+    value: RUNNING
+- name: flink-jobmanager-ready
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  check:
+    type: resource_property
+    kind: flinkdeployment
+    resource_name: streaming-flink
+    namespace: streaming
+    path: status.jobManagerDeploymentStatus
+    op: eq
+    value: READY
+- name: traffic-engine-identity-preserved
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  check:
+    type: all
+    checks:
+    - type: identity_preserved
+      kind: Deployment
+      resource_name: traffic-engine
+      namespace: streaming
+    - type: identity_preserved
+      kind: Service
+      resource_name: traffic-engine
+      namespace: streaming
+    - type: resource_property
+      kind: Deployment
+      resource_name: traffic-engine
+      namespace: streaming
+      path: spec.template.spec.containers[0].image
+      op: eq
+      value: devops-bench/traffic-engine:1.0.0
+    - type: resource_property
+      kind: Service
+      resource_name: traffic-engine
+      namespace: streaming
+      path: spec.selector.app
+      op: eq
+      value: traffic-engine
+- name: fresh-input-on-time-holds
+  role: objective
+  mode: hold
+  hold_poll_interval_sec: 30.0
+  hold_window_sec: 600.0
+  check:
+    type: http_probe
+    url: http://traffic-engine.streaming.svc.cluster.local:8080/status
+    expect_status: 200
+    expect_body_matches: (?=.*"recent_late_60s":\s*0\b)(?=.*"recent_valid_60s":\s*[1-9]\d*)(?=.*"late_fraction":\s*0(?:\.0)?\b)
+    namespace: streaming
+    probe_timeout: 5
+- name: late-profile-restored
+  role: objective
+  mode: converge
+  check:
+    type: http_probe
+    url: http://traffic-engine.streaming.svc.cluster.local:8080/status
+    expect_status: 200
+    expect_body_matches: '"late_max_seconds":\s*1\b'
+    namespace: streaming
+    probe_timeout: 5
+validated: true

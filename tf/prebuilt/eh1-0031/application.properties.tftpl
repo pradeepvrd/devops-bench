@@ -1,0 +1,74 @@
+debezium.sink.type=kafka
+debezium.sink.kafka.producer.bootstrap.servers=${kafka_bootstrap}
+debezium.sink.kafka.producer.key.serializer=org.apache.kafka.common.serialization.StringSerializer
+debezium.sink.kafka.producer.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+debezium.format.value.schemas.enable=false
+debezium.format.key.schemas.enable=false
+
+debezium.sink.kafka.producer.max.block.ms=3600000
+debezium.sink.kafka.producer.delivery.timeout.ms=3600000
+debezium.sink.kafka.producer.request.timeout.ms=30000
+debezium.sink.kafka.producer.retries=2147483647
+debezium.source.errors.max.retries=-1
+
+debezium.source.connector.class=io.debezium.connector.postgresql.PostgresConnector
+debezium.source.database.hostname=shop-rw
+debezium.source.database.port=5432
+debezium.source.database.dbname=shop
+debezium.source.database.user=debezium
+debezium.source.database.password=$${DEBEZIUM_DB_PASSWORD}
+debezium.source.plugin.name=pgoutput
+debezium.source.slot.name=debezium
+debezium.source.publication.name=cdc_publication
+# Publication membership is not modified automatically.
+debezium.source.publication.autocreate.mode=disabled
+debezium.source.topic.prefix=${debezium_topic_prefix}
+debezium.source.schema.include.list=public
+
+# Includes the signal table alongside the application tables; the monthly
+# orders partitions are matched by a single regex rather than listed
+# individually.
+debezium.source.table.include.list=public.customers,public.products,public.order_items,public.debezium_signal,public.orders_\\d{4}_\\d{2}
+debezium.source.decimal.handling.mode=double
+
+# Signal channel: ad-hoc commands (e.g. an incremental snapshot request)
+# are read from this table rather than from a Kafka signal topic.
+debezium.source.signal.enabled.channels=source
+debezium.source.signal.data.collection=public.debezium_signal
+
+# Each monthly orders partition would otherwise land on its own topic;
+# this transform rewrites every one of those onto the single topic
+# consumers actually read, cdc.public.orders.
+debezium.transforms=route
+debezium.transforms.route.type=io.debezium.transforms.ByLogicalTableRouter
+debezium.transforms.route.topic.regex=(.*)\\.public\\.orders_[0-9]{4}_[0-9]{2}
+debezium.transforms.route.topic.replacement=$1.public.orders
+
+# Offset and schema history storage, Kafka-backed.
+debezium.source.offset.storage=org.apache.kafka.connect.storage.KafkaOffsetBackingStore
+debezium.source.bootstrap.servers=${kafka_bootstrap}
+debezium.source.offset.storage.topic=${offsets_topic}
+debezium.source.offset.storage.partitions=1
+debezium.source.offset.storage.replication.factor=1
+debezium.source.offset.flush.interval.ms=5000
+
+debezium.source.schema.history.internal=io.debezium.storage.kafka.history.KafkaSchemaHistory
+debezium.source.schema.history.internal.kafka.bootstrap.servers=${kafka_bootstrap}
+debezium.source.schema.history.internal.kafka.topic=${schema_history_topic}
+
+quarkus.log.level=INFO
+quarkus.http.port=8080
+
+# Broker authentication; no Kafka admin/create/delete permission.
+debezium.sink.kafka.producer.security.protocol=SASL_PLAINTEXT
+debezium.sink.kafka.producer.sasl.mechanism=SCRAM-SHA-512
+debezium.sink.kafka.producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.security.protocol=SASL_PLAINTEXT
+debezium.source.sasl.mechanism=SCRAM-SHA-512
+debezium.source.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.schema.history.internal.producer.security.protocol=SASL_PLAINTEXT
+debezium.source.schema.history.internal.producer.sasl.mechanism=SCRAM-SHA-512
+debezium.source.schema.history.internal.producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.schema.history.internal.consumer.security.protocol=SASL_PLAINTEXT
+debezium.source.schema.history.internal.consumer.sasl.mechanism=SCRAM-SHA-512
+debezium.source.schema.history.internal.consumer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";

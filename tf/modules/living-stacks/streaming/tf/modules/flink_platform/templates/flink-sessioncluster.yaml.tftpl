@@ -1,0 +1,84 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: streaming-flink
+  namespace: ${namespace}
+spec:
+  image: ${session_image}
+  flinkVersion: ${flink_version}
+  serviceAccount: flink
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "${taskmanager_slots}"
+    execution.checkpointing.interval: "${checkpoint_interval}"
+    state.checkpoints.dir: ${checkpoints_dir}
+    # FlinkSessionJob's upgradeMode: savepoint (../flink_sql_job's default,
+    # required for the stop/redeploy/restore mechanics
+    # factory-303/docs/flink-sessionjob-spike.md proved live) refuses to
+    # reconcile at all without this set: "Job could not be upgraded with
+    # savepoint while config key[execution.checkpointing.savepoint-dir] is
+    # not set", confirmed live during this scene's own validation. Neither
+    # streaming/base/flink-sessioncluster.yaml nor the spike's own
+    # session-cluster.yaml (which never exercised upgradeMode: savepoint end
+    # to end against a *shared* Flink 1.20 session, only against the spike's
+    # own throwaway one) set this, so there was no existing manifest to copy
+    # it from.
+    execution.checkpointing.savepoint-dir: ${savepoints_dir}
+    # See flink_platform/README for the taskmanager memory/checkpoint-
+    # tolerance rationale (living-stacks/streaming/overlays/gke/flink-gcs-patch.yaml's
+    # own comment, carried forward verbatim): the default hashmap state
+    # backend leaves managed memory (meant for RocksDB) idle while the task
+    # heap is shared by three SQL jobs; a small managed fraction plus
+    # tolerating a few failed checkpoints avoids an OOM-triggered restart loop.
+    taskmanager.memory.managed.fraction: "${managed_memory_fraction}"
+    execution.checkpointing.tolerable-failed-checkpoints: "${tolerable_failed_checkpoints}"
+  podTemplate:
+    metadata:
+      labels:
+        living-stack: ${system}
+        living-stack-component: streaming
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: flink-main-container
+          env:
+            - name: ENABLE_BUILT_IN_PLUGINS
+              value: flink-gs-fs-hadoop-1.20.5.jar
+          volumeMounts:
+            - name: flink-lib
+              mountPath: /opt/flink/lib
+            - name: flink-data
+              mountPath: /flink-data
+            - name: sql-jobs
+              mountPath: /sql-jobs
+      initContainers:
+        - name: fetch-kafka-connector
+          image: ${session_image}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cp -r /opt/flink/lib/. /flink-lib/
+              curl -sSL -o /flink-lib/flink-sql-connector-kafka-${kafka_connector_version}.jar \
+                https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-kafka/${kafka_connector_version}/flink-sql-connector-kafka-${kafka_connector_version}.jar
+          volumeMounts:
+            - name: flink-lib
+              mountPath: /flink-lib
+      volumes:
+        - name: flink-lib
+          emptyDir: {}
+        - name: flink-data
+          emptyDir: {}
+        - name: sql-jobs
+          configMap:
+            name: ${sql_scripts_configmap_name}
+  jobManager:
+    replicas: 1
+    resource:
+      cpu: ${jobmanager_cpu}
+      memory: ${jobmanager_memory}
+  taskManager:
+    replicas: 1
+    resource:
+      cpu: ${taskmanager_cpu}
+      memory: ${taskmanager_memory}

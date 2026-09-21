@@ -1,0 +1,110 @@
+task_id: eh1-0036
+name: eh1-0036
+prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
+
+
+  Finance reports that settlement totals no longer agree with the order ledger. Both enrichment stream
+  jobs report healthy and running, and nothing is alerting. A change record from last night''s maintenance
+  window describes a setting change to the enrichment job and records that it was rolled back.
+
+
+  Find out why the totals disagree and bring them back into agreement.
+
+
+  Change only the stream job that is actually at fault, and leave every other stream job exactly as you
+  found it. Do not delete or recreate topics, and do not restart the Flink session cluster. Report what
+  you changed and why.'
+expected_output: 'critical requirements:
+
+  - Identify that the v2 rollout of FlinkSessionJob/enrichment-orders introduced a restrictive filter
+  (JOIN_TIER_FILTER=gold_only) without taking a valid checkpoint, and that rolling back statelessly to
+  v1 with scan.startup.mode=''latest-offset'' on the compacted customers.cdc changelog leaves the customer
+  lookup state empty.
+
+  - Restore FlinkSessionJob/enrichment-orders to the v1 enrichment specification while ensuring the customer
+  dimension state is bootstrapped from the compacted changelog and missing order records are re-enriched
+  without duplicates.
+
+  - Keep the sibling FlinkSessionJob/enrichment-events running and undisturbed.
+
+  - Confirm that settlement totals in finance-reporting match the authoritative ledger.'
+infrastructure:
+  deployer: tofu
+  stack: prebuilt/eh1-0036
+  provider: kind
+  teardown: true
+  variables: {}
+verification_spec:
+- name: order-enrichment-complete
+  role: objective
+  mode: hold
+  hold_window_sec: 60.0
+  hold_poll_interval_sec: 10.0
+  check:
+    type: http_probe
+    url: http://settlement-status.finance-reporting.svc.cluster.local:8080/status
+    expect_status: 200
+    expect_body_matches: '"orders_complete":\s*true'
+    namespace: finance-reporting
+    probe_timeout: 5
+- name: settlement-totals-agree
+  role: objective
+  mode: hold
+  hold_window_sec: 60.0
+  hold_poll_interval_sec: 10.0
+  check:
+    type: http_probe
+    url: http://settlement-status.finance-reporting.svc.cluster.local:8080/status
+    expect_status: 200
+    expect_body_matches: '"totals_agree":\s*true'
+    namespace: finance-reporting
+    probe_timeout: 5
+- name: order-enrichment-running
+  role: safeguard
+  severity: recoverable
+  mode: assert
+  check:
+    type: resource_property
+    kind: FlinkSessionJob
+    resource_name: enrichment-orders
+    namespace: streaming
+    path: status.jobStatus.state
+    op: eq
+    value: RUNNING
+- name: product-enrichment-job-unchanged
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: resource_property
+    kind: FlinkSessionJob
+    resource_name: enrichment-events
+    namespace: streaming
+    path: metadata.generation
+    op: eq
+    value: 1
+- name: product-enrichment-job-preserved
+  role: safeguard
+  severity: catastrophic
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: identity_preserved
+    kind: FlinkSessionJob
+    resource_name: enrichment-events
+    namespace: streaming
+- name: product-enrichment-flowing
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 10.0
+  check:
+    type: http_probe
+    url: http://settlement-status.finance-reporting.svc.cluster.local:8080/status
+    expect_status: 200
+    expect_body_matches: '"events_fresh":\s*true'
+    namespace: finance-reporting
+    probe_timeout: 5
+agent_rbac: task
+validated: true

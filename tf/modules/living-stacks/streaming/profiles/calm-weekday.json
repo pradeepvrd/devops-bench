@@ -1,0 +1,24 @@
+{
+  "base_rate_eps": 15,
+  "day_length_minutes": 120,
+  "diurnal_amplitude": 0.6,
+  "burst": {
+    "prob_per_minute": 0.02,
+    "multiplier": 4,
+    "duration_seconds": 30
+  },
+  "event_mix": {
+    "page_view": 0.6,
+    "add_to_cart": 0.2,
+    "order": 0.1,
+    "payment": 0.08,
+    "inventory_update": 0.02
+  },
+  "zipf_alpha": 1.2,
+  "user_pool_size": 5000,
+  "product_pool_size": 800,
+  "malformed_fraction": 0.01,
+  "duplicate_fraction": 0.01,
+  "late_fraction": 0.02,
+  "late_max_seconds": 120
+}
