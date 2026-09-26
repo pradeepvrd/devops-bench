@@ -1,0 +1,37 @@
+# Settings for the onlineboutique chart.
+#
+# Chart: oci://us-docker.pkg.dev/online-boutique-ci/charts/onlineboutique
+# Pinned version: 0.10.6 (appVersion v0.10.6)
+#
+# Only one lane (GKE) exists for this stack (see README.md), so unlike
+# otel-demo/ there is no separate values-common.yaml/values-gke.yaml split
+# and nothing here needs envsubst-style ${...} placeholders: PROFILE
+# (loadgenerator USERS/RATE) and the living-stack labels are applied by
+# post-renderer.sh instead, since the chart has no values key for either
+# (see post-renderer.sh and README.md "Label mechanism").
+#
+# The chart's stock resources.requests/limits for every component are
+# already honest (checked directly against the shipped values.yaml, not
+# guessed: e.g. adservice 200m/180Mi, cartservice 200m/128Mi, redis-cart
+# 70m/200Mi, loadgenerator 300m/256Mi), so nothing is overridden here.
+
+images:
+  # The chart's stock default (images.repository:
+  # us-central1-docker.pkg.dev/google-samples/microservices-demo) is stale:
+  # that Artifact Registry path's newest published tag is v0.10.5, one
+  # release behind this chart's pinned appVersion v0.10.6, so every
+  # container ImagePullBackOffs with "not found" using the chart default.
+  # Confirmed live (`crane`-style tag list against both paths) and against
+  # the v0.10.6 release manifest published upstream
+  # (release/kubernetes-manifests.yaml in the microservices-demo repo),
+  # which points at this path instead. All ten app images plus loadgenerator
+  # exist here at tag v0.10.6.
+  repository: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo
+
+frontend:
+  # ClusterIP only. This stack's verify checks and stack.sh's probe pod
+  # curl the in-cluster "frontend" Service directly, the same pattern
+  # otel-demo/ uses for frontend-proxy, so a real GCP LoadBalancer per
+  # instance (the chart's default externalService: true) is unnecessary
+  # spend and provisioning delay.
+  externalService: false

@@ -1,0 +1,48 @@
+debezium.sink.type=kafka
+debezium.sink.kafka.producer.bootstrap.servers=${kafka_bootstrap}
+debezium.sink.kafka.producer.key.serializer=org.apache.kafka.common.serialization.StringSerializer
+debezium.sink.kafka.producer.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+# Plain JSON envelopes (no embedded schema block) so the messages are readable in the README
+# and greppable for the end-to-end marker check.
+debezium.format.value.schemas.enable=false
+debezium.format.key.schemas.enable=false
+
+debezium.source.connector.class=io.debezium.connector.postgresql.PostgresConnector
+debezium.source.database.hostname=shop-rw
+debezium.source.database.port=5432
+debezium.source.database.dbname=shop
+debezium.source.database.user=debezium
+debezium.source.database.password=$${DEBEZIUM_DB_PASSWORD}
+debezium.source.plugin.name=pgoutput
+debezium.source.slot.name=debezium
+debezium.source.publication.name=cdc_publication
+debezium.source.publication.autocreate.mode=disabled
+debezium.source.topic.prefix=${debezium_topic_prefix}
+debezium.source.schema.include.list=public
+debezium.source.table.include.list=public.customers,public.products,public.orders,public.order_items
+# double is lossy for extreme precision/scale but is the simplest numeric shape for downstream
+# consumers (Flink's debezium-json decoder in particular): NUMERIC columns land as plain JSON
+# numbers instead of base64-encoded Kafka Connect Decimal bytes. Fine for this shop schema's
+# NUMERIC(10,2) money columns.
+debezium.source.decimal.handling.mode=double
+
+# Offset and schema history storage: Kafka-backed (the sanctioned first choice), pointed at the
+# target Kafka bus. debezium-storage-kafka is bundled in the debezium/server image, no extra
+# jars needed. The offset and schema-history topics themselves are out of scope for this module
+# set (see cdc/tf README): they are Strimzi KafkaTopic CRs that belong to the streaming scene's
+# Kafka namespace, not this one.
+debezium.source.offset.storage=org.apache.kafka.connect.storage.KafkaOffsetBackingStore
+# KafkaOffsetBackingStore is a plain Kafka Connect worker component: it reads the shared
+# bootstrap.servers property, there is no offset.storage.bootstrap.servers override.
+debezium.source.bootstrap.servers=${kafka_bootstrap}
+debezium.source.offset.storage.topic=${offsets_topic}
+debezium.source.offset.storage.partitions=1
+debezium.source.offset.storage.replication.factor=1
+debezium.source.offset.flush.interval.ms=5000
+
+debezium.source.schema.history.internal=io.debezium.storage.kafka.history.KafkaSchemaHistory
+debezium.source.schema.history.internal.kafka.bootstrap.servers=${kafka_bootstrap}
+debezium.source.schema.history.internal.kafka.topic=${schema_history_topic}
+
+quarkus.log.level=INFO
+quarkus.http.port=8080

@@ -1,0 +1,32 @@
+# KafkaTopic CR for otel-demo's order flow, applied against the shared
+# streaming/ Strimzi Kafka bus (ns $KAFKA_NS, cluster "kafka"), not the
+# storefront namespace. See ../README.md for why.
+#
+# ${kafka_namespace}, ${namespace}, ${system}, and ${kafka_topic} are filled in at deploy
+# time by stack.sh's render_values step (envsubst against a restricted
+# variable allowlist); nothing in this file is edited in place. The CR name
+# is suffixed with $NS so multiple storefront instances (e.g.
+# storefront-prod, storefront-staging) never collide on CR names inside the
+# same $KAFKA_NS.
+#
+# The demo's checkout/accounting/fraud-detection components all read the
+# topic name from the KAFKA_TOPIC env var at runtime (confirmed against the
+# chart's shipped source, not hardcoded), so ${kafka_topic} here always
+# matches what values-gke.yaml's envOverrides set on those three
+# components. See README.md's TOPIC_PREFIX section.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: ${resource_name}
+  namespace: ${kafka_namespace}
+  labels:
+    strimzi.io/cluster: kafka
+    app: otel-demo
+    living-stack: ${system}
+    living-stack-component: storefront
+spec:
+  topicName: ${kafka_topic}
+  partitions: ${partitions}
+  replicas: 1
+  config:
+    retention.ms: ${retention_ms}

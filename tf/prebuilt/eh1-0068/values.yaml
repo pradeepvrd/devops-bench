@@ -1,0 +1,8 @@
+images:
+  repository: us-central1-docker.pkg.dev/online-boutique-ci/microservices-demo
+
+frontend:
+  externalService: false
+
+loadGenerator:
+  checkFrontendInitContainer: false
