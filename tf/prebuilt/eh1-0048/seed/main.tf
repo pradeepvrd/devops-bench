@@ -36,9 +36,10 @@ locals {
             targetPort = 5050
           },
           {
-            name       = "grpc-checkout"
-            port       = 50051
-            targetPort = 5050
+            name        = "grpc-checkout"
+            port        = 50051
+            targetPort  = 50051
+            appProtocol = "grpc"
           }
         ]
       }

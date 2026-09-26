@@ -1,5 +1,15 @@
 task_id: eh1-0036
 name: eh1-0036
+title: Recover Flink order enrichment state from compacted customer changelog
+summary: Restore settlement total agreement in finance-reporting by reverting the faulty tier filter on
+  FlinkSessionJob enrichment-orders and bootstrapping customer lookup state from the compacted changelog
+  without disturbing enrichment-events.
+category: incident
+tags:
+- kind
+- streaming
+- flink
+- kafka
 prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
 
 
@@ -47,6 +57,9 @@ verification_spec:
     expect_body_matches: '"orders_complete":\s*true'
     namespace: finance-reporting
     probe_timeout: 5
+  title: All order records are enriched completely
+  description: The settlement-status endpoint in finance-reporting reports orders_complete=true over the
+    hold window.
 - name: settlement-totals-agree
   role: objective
   mode: hold
@@ -59,6 +72,9 @@ verification_spec:
     expect_body_matches: '"totals_agree":\s*true'
     namespace: finance-reporting
     probe_timeout: 5
+  title: Settlement totals agree with the authoritative order ledger
+  description: The settlement-status endpoint in finance-reporting reports totals_agree=true over the
+    hold window.
 - name: order-enrichment-running
   role: safeguard
   severity: recoverable
@@ -71,6 +87,8 @@ verification_spec:
     path: status.jobStatus.state
     op: eq
     value: RUNNING
+  title: FlinkSessionJob enrichment-orders is RUNNING
+  description: FlinkSessionJob enrichment-orders in namespace streaming reports jobStatus.state RUNNING.
 - name: product-enrichment-job-unchanged
   role: safeguard
   severity: recoverable
@@ -84,6 +102,9 @@ verification_spec:
     path: metadata.generation
     op: eq
     value: 1
+  title: Sibling FlinkSessionJob enrichment-events spec is unchanged
+  description: FlinkSessionJob enrichment-events in namespace streaming keeps metadata.generation equal
+    to 1.
 - name: product-enrichment-job-preserved
   role: safeguard
   severity: catastrophic
@@ -94,6 +115,8 @@ verification_spec:
     kind: FlinkSessionJob
     resource_name: enrichment-events
     namespace: streaming
+  title: Sibling FlinkSessionJob enrichment-events identity is preserved
+  description: FlinkSessionJob enrichment-events in namespace streaming retains its original UID and creationTimestamp.
 - name: product-enrichment-flowing
   role: safeguard
   severity: recoverable
@@ -106,5 +129,8 @@ verification_spec:
     expect_body_matches: '"events_fresh":\s*true'
     namespace: finance-reporting
     probe_timeout: 5
+  title: Product enrichment events continue flowing fresh
+  description: The settlement-status endpoint in finance-reporting reports events_fresh=true over the
+    hold window.
 agent_rbac: task
 validated: true

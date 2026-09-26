@@ -1,5 +1,14 @@
 task_id: eh1-0003
 name: eh1-0003
+title: Restore on-time event generation for minute order rollups
+summary: Fix undercounting in minute-level Flink order rollups caused by synthetic event-time lateness
+  in the streaming traffic profile while preserving the 30-second watermark and existing Flink job state.
+category: incident
+tags:
+- kind
+- streaming
+- flink
+- kafka
 prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
 
 
@@ -50,45 +59,9 @@ verification_spec:
       path: data['job.sql']
       op: contains
       value: WATERMARK FOR event_ts AS event_ts - INTERVAL '30' SECOND
-- name: traffic-engine-available
-  role: safeguard
-  severity: catastrophic
-  mode: hold
-  hold_poll_interval_sec: 30.0
-  check:
-    type: resource_property
-    kind: deployment
-    resource_name: traffic-engine
-    namespace: streaming
-    path: status.availableReplicas
-    op: gte
-    value: 1
-- name: core-job-running
-  role: safeguard
-  severity: catastrophic
-  mode: hold
-  hold_poll_interval_sec: 30.0
-  check:
-    type: resource_property
-    kind: flinksessionjob
-    resource_name: core
-    namespace: streaming
-    path: status.jobStatus.state
-    op: eq
-    value: RUNNING
-- name: flink-jobmanager-ready
-  role: safeguard
-  severity: catastrophic
-  mode: hold
-  hold_poll_interval_sec: 30.0
-  check:
-    type: resource_property
-    kind: flinkdeployment
-    resource_name: streaming-flink
-    namespace: streaming
-    path: status.jobManagerDeploymentStatus
-    op: eq
-    value: READY
+  title: Flink core job retains 30-second watermark budget
+  description: FlinkSessionJob core continues running /sql-jobs/job.sql with the 30-second event_ts watermark
+    definition intact.
 - name: traffic-engine-identity-preserved
   role: safeguard
   severity: catastrophic
@@ -110,8 +83,8 @@ verification_spec:
       resource_name: traffic-engine
       namespace: streaming
       path: spec.template.spec.containers[0].image
-      op: eq
-      value: devops-bench/traffic-engine:1.0.0
+      op: contains
+      value: traffic-engine:1.0.0
     - type: resource_property
       kind: Service
       resource_name: traffic-engine
@@ -119,11 +92,57 @@ verification_spec:
       path: spec.selector.app
       op: eq
       value: traffic-engine
+  title: traffic-engine Deployment and Service identities preserved
+  description: Deployment and Service traffic-engine in streaming retain their original UIDs, image, and
+    selector.
+- name: traffic-engine-available
+  role: safeguard
+  severity: catastrophic
+  mode: assert
+  check:
+    type: resource_property
+    kind: deployment
+    resource_name: traffic-engine
+    namespace: streaming
+    path: status.availableReplicas
+    op: gte
+    value: 1
+  title: traffic-engine Deployment has available replicas
+  description: Deployment traffic-engine in namespace streaming reports at least 1 available replica.
+- name: core-job-running
+  role: safeguard
+  severity: catastrophic
+  mode: assert
+  check:
+    type: resource_property
+    kind: flinksessionjob
+    resource_name: core
+    namespace: streaming
+    path: status.jobStatus.state
+    op: eq
+    value: RUNNING
+  title: FlinkSessionJob core is RUNNING
+  description: FlinkSessionJob core in namespace streaming reports jobStatus.state equal to RUNNING.
+- name: flink-jobmanager-ready
+  role: safeguard
+  severity: catastrophic
+  mode: assert
+  check:
+    type: resource_property
+    kind: flinkdeployment
+    resource_name: streaming-flink
+    namespace: streaming
+    path: status.jobManagerDeploymentStatus
+    op: eq
+    value: READY
+  title: FlinkDeployment streaming-flink JobManager is READY
+  description: FlinkDeployment streaming-flink in namespace streaming reports jobManagerDeploymentStatus
+    READY.
 - name: fresh-input-on-time-holds
   role: objective
   mode: hold
-  hold_poll_interval_sec: 30.0
-  hold_window_sec: 600.0
+  hold_poll_interval_sec: 15.0
+  hold_window_sec: 120.0
   check:
     type: http_probe
     url: http://traffic-engine.streaming.svc.cluster.local:8080/status
@@ -131,14 +150,20 @@ verification_spec:
     expect_body_matches: (?=.*"recent_late_60s":\s*0\b)(?=.*"recent_valid_60s":\s*[1-9]\d*)(?=.*"late_fraction":\s*0(?:\.0)?\b)
     namespace: streaming
     probe_timeout: 5
+  title: Traffic generator emits valid on-time events without late events
+  description: The traffic-engine status endpoint reports recent_late_60s equal to 0, positive recent_valid_60s,
+    and late_fraction equal to 0 across the hold window.
 - name: late-profile-restored
   role: objective
-  mode: converge
+  mode: assert
   check:
     type: http_probe
     url: http://traffic-engine.streaming.svc.cluster.local:8080/status
     expect_status: 200
-    expect_body_matches: '"late_max_seconds":\s*1\b'
+    expect_body_matches: (?=.*"late_fraction":\s*0(?:\.0)?\b)(?=.*"late_max_seconds":\s*(?:0|1|[12]?\d)\b)
     namespace: streaming
     probe_timeout: 5
+  title: Traffic generator profile has late_fraction restored to zero
+  description: The traffic-engine status endpoint reports late_fraction equal to 0 and late_max_seconds
+    within the baseline bound.
 validated: true

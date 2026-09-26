@@ -189,7 +189,14 @@ resource "kubernetes_config_map_v1" "checkout_metrics_script" {
               req_m = "checkout_" + "requests_total"
               err_m = "checkout_" + "errors_total"
               sn = "service_" + "name"
-              if self.path.startswith("/legacy"):
+              if self.path.startswith("/collector"):
+                  cm = "otelcol_process_uptime"
+                  body = (
+                      f"# HELP {cm} Uptime of the collector\n"
+                      f"# TYPE {cm} counter\n"
+                      f'{cm}{{{sn}="opentelemetry-collector",service="opentelemetry-collector"}} {elapsed:.2f}\n'
+                  ).encode("utf-8")
+              elif self.path.startswith("/legacy"):
                   body = (
                       f"# HELP {req_m} Total checkout requests\n"
                       f"# TYPE {req_m} counter\n"
@@ -278,6 +285,24 @@ resource "kubectl_manifest" "checkout_metrics_service" {
   depends_on        = [kubectl_manifest.checkout_metrics_deployment]
 }
 
+resource "kubectl_manifest" "otel_collector_metrics_service" {
+  yaml_body = yamlencode({
+    apiVersion = "v1"
+    kind       = "Service"
+    metadata = {
+      name      = "otel-collector-metrics"
+      namespace = local.ns
+    }
+    spec = {
+      type     = "ClusterIP"
+      selector = { app = "checkout-metrics" }
+      ports    = [{ name = "metrics", port = 8888, targetPort = 8080 }]
+    }
+  })
+  server_side_apply = true
+  depends_on        = [kubectl_manifest.checkout_metrics_deployment]
+}
+
 # Baseline identity for the collector Deployment: identity_preserved
 # compares its live uid and creation time against these baseline annotations.
 locals {
@@ -330,7 +355,12 @@ resource "kubectl_manifest" "seed_rbac" {
   wait              = true
   wait_for_rollout  = false
 
-  depends_on = [module.scene_otel_demo, kubernetes_annotations.identity_baseline]
+  depends_on = [
+    module.scene_otel_demo,
+    kubernetes_annotations.identity_baseline,
+    kubectl_manifest.checkout_metrics_service,
+    kubectl_manifest.otel_collector_metrics_service,
+  ]
 }
 
 resource "kubectl_manifest" "seed" {

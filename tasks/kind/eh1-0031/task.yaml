@@ -1,5 +1,16 @@
 task_id: eh1-0031
 name: eh1-0031
+title: Add monthly orders partition to PostgreSQL logical publication and backfill via Debezium signal
+summary: Restore missing current-month orders on the CDC Kafka feed by adding the new monthly partition
+  to cdc_publication and triggering an incremental Debezium snapshot without dropping the replication
+  slot or losing history.
+category: incident
+tags:
+- kind
+- cdc
+- postgresql
+- debezium
+- kafka
 agent_rbac: task
 prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
 
@@ -144,6 +155,9 @@ verification_spec:
     expect_body_matches: '"slot_and_offsets_preserved":\s*true\b'
     namespace: orders-db
     probe_timeout: 30
+  title: PostgreSQL replication slot and Debezium offsets preserved
+  description: The cdc-observer status endpoint confirms slot_and_offsets_preserved remains true throughout
+    the run.
 - name: prior-month-history-preserved
   role: safeguard
   mode: hold
@@ -156,6 +170,9 @@ verification_spec:
     expect_body_matches: '"prior_month_rows_intact":\s*true\b'
     namespace: orders-db
     probe_timeout: 30
+  title: Prior month order records remain intact
+  description: The cdc-observer status endpoint confirms prior_month_rows_intact remains true throughout
+    the run.
 - name: current-month-backlog-backfilled
   role: objective
   mode: converge
@@ -166,6 +183,8 @@ verification_spec:
     expect_body_matches: '"missing_pre_repair_month_orders":\s*0\b'
     namespace: orders-db
     probe_timeout: 30
+  title: Current month pre-repair orders backfilled to Kafka
+  description: The cdc-observer status endpoint reports missing_pre_repair_month_orders equal to 0.
 - name: fresh-writes-streaming
   role: objective
   mode: converge
@@ -176,4 +195,6 @@ verification_spec:
     expect_body_matches: '"fresh_post_repair_writes_delivered":\s*true\b'
     namespace: orders-db
     probe_timeout: 30
+  title: Fresh post-repair order writes stream to Kafka
+  description: The cdc-observer status endpoint reports fresh_post_repair_writes_delivered equal to true.
 validated: true

@@ -14,27 +14,7 @@
 
 # seed: the fault, as scene overrides and objects. Applied under every arm.
 locals {
-  overrides = {
-    streaming = {
-      kafka_cr_overrides = {
-        listeners = [
-          {
-            name = "plain"
-            port = 9092
-            type = "internal"
-            tls  = false
-          },
-          {
-            name           = "scram"
-            port           = 9093
-            type           = "internal"
-            tls            = false
-            authentication = { type = "scram-sha-512" }
-          }
-        ]
-      }
-    }
-  }
+  overrides = {}
 
   objects = {
     "streaming/Secret/kafka-indexer-credentials" = {
@@ -46,34 +26,8 @@ locals {
       }
       type = "Opaque"
       stringData = {
-        "sasl.mechanism" = "scram_sha512"
-        "sasl.username"  = "indexer"
-        "sasl.password"  = "keda-secure-indexer-pass"
-      }
-    }
-
-    "streaming/KafkaUser/indexer" = {
-      apiVersion = "kafka.strimzi.io/v1"
-      kind       = "KafkaUser"
-      metadata = {
-        name      = "indexer"
-        namespace = "streaming"
-        labels = {
-          "strimzi.io/cluster" = "kafka"
-        }
-      }
-      spec = {
-        authentication = {
-          type = "scram-sha-512"
-          password = {
-            valueFrom = {
-              secretKeyRef = {
-                name = "kafka-indexer-credentials"
-                key  = "sasl.password"
-              }
-            }
-          }
-        }
+        "sasl.username" = "indexer"
+        "sasl.password" = "keda-secure-indexer-pass"
       }
     }
 
@@ -89,7 +43,7 @@ locals {
           {
             parameter = "sasl"
             name      = "kafka-indexer-credentials"
-            key       = "sasl.mechanism"
+            key       = "sasl.username"
           },
           {
             parameter = "username"
@@ -117,12 +71,12 @@ locals {
           {
             type = "Container"
             default = {
-              cpu    = "1000m"
-              memory = "2Gi"
+              cpu    = "2000m"
+              memory = "4Gi"
             }
             defaultRequest = {
-              cpu    = "500m"
-              memory = "1Gi"
+              cpu    = "1500m"
+              memory = "3Gi"
             }
           }
         ]
@@ -234,6 +188,20 @@ PY
                     containerPort = 8080
                   }
                 ]
+                env = [
+                  {
+                    name  = "KAFKA_BOOTSTRAP_SERVERS"
+                    value = "kafka-kafka-bootstrap.streaming.svc:9092"
+                  },
+                  {
+                    name  = "KAFKA_TOPIC"
+                    value = "events.raw"
+                  },
+                  {
+                    name  = "KAFKA_CONSUMER_GROUP"
+                    value = "order-indexer-cg"
+                  }
+                ]
                 resources = {
                   requests = {
                     cpu    = "100m"
@@ -322,8 +290,8 @@ PY
           {
             type = "kafka"
             metadata = {
-              bootstrapServers  = "kafka-kafka-bootstrap.streaming.svc:9093"
-              consumerGroup     = "order-indexer-group"
+              bootstrapServers  = "kafka-kafka-bootstrap.streaming.svc:9092"
+              consumerGroup     = "order-indexer-legacy"
               topic             = "events.raw"
               lagThreshold      = "5"
               offsetResetPolicy = "earliest"

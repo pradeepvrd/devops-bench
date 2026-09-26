@@ -135,9 +135,16 @@ locals {
     }
   })
 
+  collector_presets = {
+    hostMetrics    = { enabled = false }
+    kubeletMetrics = { enabled = false }
+    clusterMetrics = { enabled = false }
+  }
+
   overrides = {
     scenario_json_override = local.scenario_json
     collector_values = {
+      presets = local.collector_presets
       config = {
         receivers = {
           "prometheus/checkout" = {
@@ -182,9 +189,6 @@ locals {
                 "span_metrics",
                 "prometheus/ad",
                 "receiver_creator/metrics",
-                "hostmetrics",
-                "kubeletstats",
-                "k8s_cluster",
                 "prometheus/checkout",
                 "prometheus/legacy-compat",
               ]
@@ -215,9 +219,10 @@ locals {
         - localhost:9090
     - job_name: opentelemetry-collector
       scrape_interval: 5s
+      metrics_path: /collector-metrics
       static_configs:
       - targets:
-        - localhost:9090
+        - otel-collector-metrics.storefront.svc.cluster.local:8888
     EOF
 
     cat <<'EOF' > /tmp/alerting_rules.yml

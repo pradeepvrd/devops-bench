@@ -1,5 +1,14 @@
 task_id: eh1-0021
 name: eh1-0021
+title: Restore checkout and shipping trace span metrics in OpenTelemetry Collector
+summary: Restore missing checkout and shipping trace telemetry in the storefront observability pipeline
+  without altering application OTLP exporter configuration or disrupting peer service telemetry.
+category: incident
+tags:
+- kind
+- observability
+- opentelemetry
+- prometheus
 prompt: 'The checkout team reports that checkout has disappeared from tracing. Their dashboards
 
   went blank during the night, and they have opened this against the platform rota because
@@ -50,6 +59,9 @@ verification_spec:
     path: spec.template.spec.containers[0].env[?(@.name=="OTEL_EXPORTER_OTLP_ENDPOINT")].value
     op: eq
     value: http://$(OTEL_COLLECTOR_NAME):4318
+  title: checkout Deployment OTLP exporter endpoint unchanged
+  description: Deployment checkout in storefront keeps OTEL_EXPORTER_OTLP_ENDPOINT pointed at the collector
+    service.
 - name: metrics-backend-reachable
   role: safeguard
   mode: assert
@@ -62,24 +74,32 @@ verification_spec:
     path: status.readyReplicas
     op: gte
     value: 1
+  title: Prometheus deployment is Ready
+  description: Deployment prometheus in namespace storefront has at least 1 Ready replica.
 - name: checkout-telemetry-restored
   role: objective
-  mode: converge
+  mode: assert
   check:
     type: http_probe
     url: http://prometheus.storefront.svc:9090/api/v1/query?query=traces_span_metrics_calls_total%7Bservice_name%3D%22checkout%22%7D
     expect_status: 200
     expect_body_matches: '"service_name":"checkout"'
     namespace: storefront
+  title: Prometheus receives span metrics for checkout
+  description: Prometheus queries for traces_span_metrics_calls_total with service_name=checkout return
+    active series.
 - name: shipping-telemetry-restored
   role: objective
-  mode: converge
+  mode: assert
   check:
     type: http_probe
     url: http://prometheus.storefront.svc:9090/api/v1/query?query=traces_span_metrics_calls_total%7Bservice_name%3D%22shipping%22%7D
     expect_status: 200
     expect_body_matches: '"service_name":"shipping"'
     namespace: storefront
+  title: Prometheus receives span metrics for shipping
+  description: Prometheus queries for traces_span_metrics_calls_total with service_name=shipping return
+    active series.
 - name: peer-telemetry-uninterrupted
   role: safeguard
   mode: assert
@@ -90,4 +110,7 @@ verification_spec:
     expect_status: 200
     expect_body_matches: '"service_name":"cart"'
     namespace: storefront
+  title: Prometheus continues receiving span metrics for cart
+  description: Prometheus queries for traces_span_metrics_calls_total with service_name=cart continue
+    returning active series.
 validated: true

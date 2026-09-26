@@ -229,7 +229,7 @@ resource "kubernetes_cluster_role_binding_v1" "gateway_verifier" {
   }
 }
 
-resource "kubernetes_config_map_v1" "gateway_verifier_script" {
+resource "kubernetes_secret_v1" "gateway_verifier_script" {
   metadata {
     name      = "gateway-verifier-script"
     namespace = kubernetes_namespace_v1.gateway_verifier.metadata[0].name
@@ -254,6 +254,7 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
           "grpc_checkout_healthy": False,
           "route_accepted": False,
           "refs_resolved": False,
+          "target_port_ok": False,
           "h2c_protocol": False,
           "socket_open": False
       }
@@ -296,6 +297,7 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
 
           accepted = False
           refs_resolved = False
+          target_port_ok = False
           h2c_protocol = False
           socket_open = False
 
@@ -353,11 +355,67 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
           except Exception:
               refs_resolved = False
 
-          # 3. Patch GRPCRoute status in gateway-infra
+          # 3. Hop 3 & 4 evaluation: Service/checkoutservice port 50051 targetPort and appProtocol
+          try:
+              svc = k8s_get("/api/v1/namespaces/boutique/services/checkoutservice", token, ctx)
+              ports = svc.get("spec", {}).get("ports", [])
+              for p in ports:
+                  if p.get("port") == 50051:
+                      if p.get("targetPort") in (5050, "grpc"):
+                          target_port_ok = True
+                      if p.get("appProtocol") == "kubernetes.io/h2c":
+                          h2c_protocol = True
+                      break
+          except Exception:
+              target_port_ok = False
+              h2c_protocol = False
+
+          # 4. Patch GRPCRoute status in gateway-infra
           try:
               route = k8s_get("/apis/gateway.networking.k8s.io/v1/namespaces/gateway-infra/grpcroutes/checkout-route", token, ctx)
               if route:
                   now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                  conditions = [
+                      {
+                          "type": "Accepted",
+                          "status": "True" if accepted else "False",
+                          "reason": "Accepted" if accepted else "NotAllowedByListeners",
+                          "message": "Route accepted" if accepted else "Route is not allowed by any matching listener",
+                          "lastTransitionTime": now_iso
+                      },
+                      {
+                          "type": "ResolvedRefs",
+                          "status": "True" if refs_resolved else "False",
+                          "reason": "ResolvedRefs" if refs_resolved else "RefNotPermitted",
+                          "message": "All references resolved" if refs_resolved else "Backend reference is not permitted",
+                          "lastTransitionTime": now_iso
+                      }
+                  ]
+                  if accepted and refs_resolved:
+                      if not target_port_ok:
+                          conditions.append({
+                              "type": "BackendHealthy",
+                              "status": "False",
+                              "reason": "ConnectionRefused",
+                              "message": "Upstream connection refused on backend Service targetPort",
+                              "lastTransitionTime": now_iso
+                          })
+                      elif not h2c_protocol:
+                          conditions.append({
+                              "type": "BackendHealthy",
+                              "status": "False",
+                              "reason": "UnsupportedAppProtocol",
+                              "message": "GRPCRoute backend Service port must declare standard KEP-1911 cleartext HTTP/2 appProtocol",
+                              "lastTransitionTime": now_iso
+                          })
+                      else:
+                          conditions.append({
+                              "type": "BackendHealthy",
+                              "status": "True",
+                              "reason": "Healthy",
+                              "message": "Backend gRPC h2c service healthy",
+                              "lastTransitionTime": now_iso
+                          })
                   status_patch = {
                       "status": {
                           "parents": [
@@ -368,22 +426,7 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
                                       "sectionName": "grpc-checkout"
                                   },
                                   "controllerName": "living-stacks.devops-bench.io/gateway-fixture",
-                                  "conditions": [
-                                      {
-                                          "type": "Accepted",
-                                          "status": "True" if accepted else "False",
-                                          "reason": "Accepted" if accepted else "NotAllowedByListeners",
-                                          "message": "Route accepted by listener grpc-checkout" if accepted else "Namespace gateway-infra not allowed by listener selector",
-                                          "lastTransitionTime": now_iso
-                                      },
-                                      {
-                                          "type": "ResolvedRefs",
-                                          "status": "True" if refs_resolved else "False",
-                                          "reason": "ResolvedRefs" if refs_resolved else "RefNotPermitted",
-                                          "message": "Backend references resolved and permitted" if refs_resolved else "ReferenceGrant in boutique does not permit GRPCRoute from gateway-infra",
-                                          "lastTransitionTime": now_iso
-                                      }
-                                  ]
+                                  "conditions": conditions
                               }
                           ]
                       }
@@ -392,20 +435,9 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
           except Exception:
               pass
 
-          # 4. Hop 3 evaluation: Service/checkoutservice port 50051 appProtocol == "kubernetes.io/h2c"
-          try:
-              svc = k8s_get("/api/v1/namespaces/boutique/services/checkoutservice", token, ctx)
-              ports = svc.get("spec", {}).get("ports", [])
-              for p in ports:
-                  if p.get("port") == 50051 and p.get("appProtocol") == "kubernetes.io/h2c":
-                      h2c_protocol = True
-                      break
-          except Exception:
-              h2c_protocol = False
-
           # 5. Socket check
           try:
-              s = socket.create_connection(("checkoutservice.boutique.svc.cluster.local", 50051), timeout=2)
+              s = socket.create_connection(("checkoutservice.boutique.svc.cluster.local", 5050), timeout=2)
               s.close()
               socket_open = True
           except Exception:
@@ -413,9 +445,10 @@ resource "kubernetes_config_map_v1" "gateway_verifier_script" {
 
           state["route_accepted"] = accepted
           state["refs_resolved"] = refs_resolved
+          state["target_port_ok"] = target_port_ok
           state["h2c_protocol"] = h2c_protocol
           state["socket_open"] = socket_open
-          state["grpc_checkout_healthy"] = bool(accepted and refs_resolved and h2c_protocol and socket_open)
+          state["grpc_checkout_healthy"] = bool(accepted and refs_resolved and target_port_ok and h2c_protocol and socket_open)
 
       def worker_loop():
           while True:
@@ -485,8 +518,8 @@ resource "kubectl_manifest" "gateway_verifier_deployment" {
           volumes = [
             {
               name = "script"
-              configMap = {
-                name = kubernetes_config_map_v1.gateway_verifier_script.metadata[0].name
+              secret = {
+                secretName = kubernetes_secret_v1.gateway_verifier_script.metadata[0].name
               }
             }
           ]
@@ -525,7 +558,7 @@ resource "kubectl_manifest" "gateway_verifier_deployment" {
   })
   server_side_apply = true
   wait_for_rollout  = true
-  depends_on        = [kubernetes_config_map_v1.gateway_verifier_script]
+  depends_on        = [kubernetes_secret_v1.gateway_verifier_script]
 }
 
 resource "kubectl_manifest" "gateway_verifier_service" {

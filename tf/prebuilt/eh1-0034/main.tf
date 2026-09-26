@@ -163,6 +163,7 @@ module "bench_agent" {
     module.scene_cdc,
     kubectl_manifest.objects,
     kubectl_manifest.connector_rollout,
+    kubernetes_deployment_v1.slot_auditor,
     kubernetes_labels.solver_pod_security,
   ]
 }
