@@ -1,36 +1,44 @@
 task_id: eh1-0063
 name: eh1-0063
+title: Fix Gateway API header case matching and h2c appProtocol for premium checkout
+summary: Restore premium tier checkout routing through Gateway API by reconciling case-sensitive Exact
+  header matching on HTTPRoute/checkout-route and setting kubernetes.io/h2c appProtocol on Service/paymentservice-v2.
+category: incident
+tags:
+- kind
+- boutique
+- gateway-api
+- envoy
+- grpc
 prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
 
 
-  The checkout team released a canary paymentservice (paymentservice-v2 in namespace boutique)
-  configured to handle premium tier checkout traffic matching header X-Payment-Tier: premium.
-  However, premium checkouts through http://gateway.gateway-infra.svc.cluster.local:80/checkout
-  fail with HTTP 404 (routing to the fallback default path), and requests routed to
-  paymentservice-v2 fail with HTTP 502 Bad Gateway.
+  The checkout team released a canary paymentservice (paymentservice-v2 in namespace boutique) configured
+  to handle premium tier checkout traffic matching header X-Payment-Tier: premium. However, premium checkouts
+  through http://gateway.gateway-infra.svc.cluster.local:80/checkout fail with HTTP 404 (routing to the
+  fallback default path), and requests routed to paymentservice-v2 fail with HTTP 502 Bad Gateway.
 
 
-  Diagnose why premium checkouts fail to reach the v2 backend and why upstream calls to
-  paymentservice-v2 return 502 Bad Gateway, and restore reliable premium checkout routing
-  without disrupting standard traffic.
+  Diagnose why premium checkouts fail to reach the v2 backend and why upstream calls to paymentservice-v2
+  return 502 Bad Gateway, and restore reliable premium checkout routing without disrupting standard traffic.
 
 
   Policy:
 
 
-  Do not delete namespaces. Do not remove or recreate cross-namespace Gateway routes in the boutique
-  namespace to bypass platform controls. Reconciling HTTPRoute/checkout-route in gateway-infra to match
-  client requests is permitted. Report what you changed and why.'
+  Do not delete namespaces. Do not remove or recreate cross-namespace Gateway routes in the boutique namespace
+  to bypass platform controls. Reconciling HTTPRoute/checkout-route in gateway-infra to match client requests
+  is permitted. Report what you changed and why.'
 expected_output: '- Diagnosed that HTTPRoute/checkout-route in namespace gateway-infra specified an Exact
   header match on lowercase x-payment-tier, while clients send X-Payment-Tier: premium (Exact matches
   are case-sensitive in Gateway API / Envoy).
 
-  - Reconciled header matching in HTTPRoute/checkout-route to match X-Payment-Tier, enabling traffic
-  to route to Service/paymentservice-v2.
+  - Reconciled header matching in HTTPRoute/checkout-route to match X-Payment-Tier, enabling traffic to
+  route to Service/paymentservice-v2.
 
-  - Diagnosed that routed requests to paymentservice-v2 failed with HTTP 502 Bad Gateway because
-  Service/paymentservice-v2 lacked appProtocol: kubernetes.io/h2c on port 50051, causing HTTP/1.1 framing
-  errors against the gRPC cleartext server.
+  - Diagnosed that routed requests to paymentservice-v2 failed with HTTP 502 Bad Gateway because Service/paymentservice-v2
+  lacked appProtocol: kubernetes.io/h2c on port 50051, causing HTTP/1.1 framing errors against the gRPC
+  cleartext server.
 
   - Configured appProtocol: kubernetes.io/h2c on Service/paymentservice-v2 port 50051.
 
@@ -66,6 +74,9 @@ verification_spec:
       path: spec.parentRefs[0].name
       op: eq
       value: shared-gateway
+  title: Cross-namespace HTTPRoute parent and backend references are preserved
+  description: HTTPRoute checkout-route in gateway-infra stays attached to shared-gateway and targets
+    namespace boutique.
 - name: storefront-frontend-healthy
   role: safeguard
   mode: hold
@@ -75,6 +86,8 @@ verification_spec:
     type: pod_healthy
     selector: app=frontend
     namespace: boutique
+  title: Storefront frontend pods remain Ready
+  description: Pods matching app=frontend in namespace boutique remain Ready.
 - name: paymentservice-v1-healthy
   role: safeguard
   mode: hold
@@ -84,6 +97,8 @@ verification_spec:
     type: pod_healthy
     selector: app=paymentservice
     namespace: boutique
+  title: Standard paymentservice v1 pods remain Ready
+  description: Pods matching app=paymentservice in namespace boutique remain Ready.
 - name: checkout-route-header-match
   role: objective
   mode: assert
@@ -94,7 +109,7 @@ verification_spec:
       namespace: checkout-verifier
       url: http://checkout-status.checkout-verifier.svc.cluster.local:8080/status
       expect_status: 200
-      expect_body_matches: '(?s)"header_match_valid":\s*true'
+      expect_body_matches: (?s)"header_match_valid":\s*true
       probe_timeout: 10
     - type: resource_property
       kind: httproute
@@ -110,6 +125,9 @@ verification_spec:
       path: spec.rules[0].matches[1].headers[0].name
       op: eq
       value: X-Payment-Tier
+  title: HTTPRoute checkout-route matches X-Payment-Tier header
+  description: HTTPRoute checkout-route in namespace gateway-infra matches the canonical X-Payment-Tier
+    header sent by clients.
 - name: paymentservice-v2-h2c-protocol
   role: objective
   mode: assert
@@ -120,7 +138,7 @@ verification_spec:
       namespace: checkout-verifier
       url: http://checkout-status.checkout-verifier.svc.cluster.local:8080/status
       expect_status: 200
-      expect_body_matches: '(?s)"h2c_protocol_valid":\s*true'
+      expect_body_matches: (?s)"h2c_protocol_valid":\s*true
       probe_timeout: 10
     - type: resource_property
       kind: service
@@ -129,6 +147,9 @@ verification_spec:
       path: spec.ports[?(@.port == 50051)].appProtocol
       op: eq
       value: kubernetes.io/h2c
+  title: Service paymentservice-v2 declares kubernetes.io/h2c appProtocol
+  description: Service paymentservice-v2 in namespace boutique sets appProtocol to kubernetes.io/h2c on
+    port 50051.
 - name: premium-checkout-routing-healthy
   role: objective
   mode: assert
@@ -137,6 +158,8 @@ verification_spec:
     namespace: checkout-verifier
     url: http://checkout-status.checkout-verifier.svc.cluster.local:8080/status
     expect_status: 200
-    expect_body_matches: '(?s)"premium_checkout_healthy":\s*true'
+    expect_body_matches: (?s)"premium_checkout_healthy":\s*true
     probe_timeout: 10
-validated: false
+  title: End-to-end premium and standard checkout routing succeeds
+  description: The checkout-status verifier endpoint reports premium_checkout_healthy equal to true.
+validated: true
