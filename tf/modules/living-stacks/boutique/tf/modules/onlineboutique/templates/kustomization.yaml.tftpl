@@ -1,0 +1,93 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - rendered.yaml
+
+patches:
+  # Patch 1 (../../post-renderer.sh's patch 1): living-stack /
+  # living-stack-component on every Deployment's pod template labels only.
+  # A JSON6902 patch broadcast via `target: {kind: Deployment}` (no `name`)
+  # matches all 12 Deployments the chart renders; it only ever adds under
+  # /spec/template/metadata/labels, so spec.selector.matchLabels is never
+  # touched, the same guarantee the original yq expression documents.
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: add
+        path: /spec/template/metadata/labels/living-stack
+        value: "${living_stack}"
+      - op: add
+        path: /spec/template/metadata/labels/living-stack-component
+        value: "${living_stack_component}"
+
+  # Patch 2 (post-renderer.sh's patch 2): the loadgenerator Deployment's
+  # `main` container USERS/RATE env values. Values are double-quoted so they
+  # round-trip as YAML strings, matching the container env schema (see
+  # ../main.tf's header comment for why this matters).
+  - target:
+      kind: Deployment
+      name: ${loadgen_name}
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: ${loadgen_name}
+      spec:
+        template:
+          spec:
+            containers:
+              - name: main
+                env:
+                  - name: USERS
+                    value: "${loadgen_users}"
+                  - name: RATE
+                    value: "${loadgen_rate}"
+
+  # Patch 3 (post-renderer.sh's patch 3): relax the emailservice Deployment's
+  # `server` container liveness/readiness probe timing. periodSeconds and
+  # failureThreshold are left as shipped, same as the original.
+  - target:
+      kind: Deployment
+      name: emailservice
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: emailservice
+      spec:
+        template:
+          spec:
+            containers:
+              - name: server
+                livenessProbe:
+                  initialDelaySeconds: 20
+                  timeoutSeconds: 3
+                readinessProbe:
+                  initialDelaySeconds: 20
+                  timeoutSeconds: 3
+
+  # Patch 4 (post-renderer.sh's patch 4): cap the redis-cart Deployment's
+  # `redis` container at a fixed maxmemory. This always patches a fresh
+  # `helm template` render (never a previously-patched manifest), so unlike
+  # the original's append-and-skip-duplicates logic, a plain args patch is
+  # equivalent here, not a simplification of its safety behavior -- see
+  # ../main.tf's header comment.
+  - target:
+      kind: Deployment
+      name: redis-cart
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: redis-cart
+      spec:
+        template:
+          spec:
+            containers:
+              - name: redis
+                args:
+                  - --maxmemory
+                  - 64mb
+                  - --maxmemory-policy
+                  - noeviction

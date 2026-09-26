@@ -1,0 +1,56 @@
+debezium.sink.type=kafka
+debezium.sink.kafka.producer.bootstrap.servers=${kafka_bootstrap}
+debezium.sink.kafka.producer.key.serializer=org.apache.kafka.common.serialization.StringSerializer
+debezium.sink.kafka.producer.value.serializer=org.apache.kafka.common.serialization.StringSerializer
+debezium.format.value.schemas.enable=false
+debezium.format.key.schemas.enable=false
+
+debezium.sink.kafka.producer.max.block.ms=3600000
+debezium.sink.kafka.producer.delivery.timeout.ms=3600000
+debezium.sink.kafka.producer.request.timeout.ms=30000
+debezium.sink.kafka.producer.retries=2147483647
+debezium.source.errors.max.retries=-1
+debezium.source.errors.retry.delay.initial.ms=3000
+debezium.source.errors.retry.delay.max.ms=5000
+
+debezium.source.connector.class=io.debezium.connector.postgresql.PostgresConnector
+debezium.source.database.hostname=shop-rw
+debezium.source.database.port=5432
+debezium.source.database.dbname=shop
+debezium.source.database.user=debezium
+debezium.source.database.password=$${DEBEZIUM_DB_PASSWORD}
+debezium.source.plugin.name=pgoutput
+debezium.source.slot.name=debezium
+debezium.source.publication.name=cdc_publication
+debezium.source.publication.autocreate.mode=disabled
+debezium.source.topic.prefix=${debezium_topic_prefix}
+debezium.source.schema.include.list=public
+debezium.source.table.include.list=public.customers,public.products,public.orders,public.order_items
+debezium.source.decimal.handling.mode=double
+
+debezium.source.offset.storage=org.apache.kafka.connect.storage.KafkaOffsetBackingStore
+debezium.source.bootstrap.servers=${kafka_bootstrap}
+debezium.source.offset.storage.topic=${offsets_topic}
+debezium.source.offset.storage.partitions=1
+debezium.source.offset.storage.replication.factor=1
+debezium.source.offset.flush.interval.ms=5000
+
+debezium.source.schema.history.internal=io.debezium.storage.kafka.history.KafkaSchemaHistory
+debezium.source.schema.history.internal.kafka.bootstrap.servers=${kafka_bootstrap}
+debezium.source.schema.history.internal.kafka.topic=${schema_history_topic}
+
+quarkus.log.level=INFO
+quarkus.http.port=8080
+
+debezium.sink.kafka.producer.security.protocol=SASL_PLAINTEXT
+debezium.sink.kafka.producer.sasl.mechanism=SCRAM-SHA-512
+debezium.sink.kafka.producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.security.protocol=SASL_PLAINTEXT
+debezium.source.sasl.mechanism=SCRAM-SHA-512
+debezium.source.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.schema.history.internal.producer.security.protocol=SASL_PLAINTEXT
+debezium.source.schema.history.internal.producer.sasl.mechanism=SCRAM-SHA-512
+debezium.source.schema.history.internal.producer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";
+debezium.source.schema.history.internal.consumer.security.protocol=SASL_PLAINTEXT
+debezium.source.schema.history.internal.consumer.sasl.mechanism=SCRAM-SHA-512
+debezium.source.schema.history.internal.consumer.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="cdc-source" password="$${CDC_KAFKA_PASSWORD}";

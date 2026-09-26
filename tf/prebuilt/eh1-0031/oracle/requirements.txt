@@ -1,0 +1,2 @@
+# psycopg is not listed here: it comes from the oltp-writer base image (Dockerfile), not pinned in this file.
+kafka-python==2.2.15 --hash=sha256:84c0993cd4f7f2f01e92d8104ea9bdf631aff72fc5e6ea62eb3bdf1d56528fc3

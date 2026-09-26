@@ -1,0 +1,426 @@
+# GKE-lane overrides for the opentelemetry-demo chart.
+#
+# Deploys the full demo (all ~27 components, including jaeger,
+# prometheus, grafana and opensearch) with honest resource requests so
+# the scheduler and Node Auto-Provisioning behave sanely. The chart's
+# stock values.yaml only sets memory limits, no requests, so every
+# component below adds a requests block without touching the limits
+# already defined upstream (Helm deep-merges maps, so this only adds
+# the `requests` key alongside the chart's existing `limits` key).
+#
+# cpu requests are sized by rough judgment (idle Go/Node/.NET services
+# get 10-25m, services that do real per-request work get 50-100m,
+# jaeger/prometheus/opensearch get more). memory requests equal
+# the chart's existing memory limits, since that's the one number we
+# actually have evidence for.
+#
+# ${namespace}, ${system}, ${kafka_bootstrap}, ${kafka_host}, ${kafka_port}, and
+# ${kafka_topic} below are filled in at deploy time by stack.sh's
+# render_values step (envsubst against a restricted variable allowlist, so
+# the chart's own `$(OTEL_COLLECTOR_NAME)` Kubernetes env var expansion
+# syntax elsewhere in this file and in values-common.yaml is never touched).
+# This file itself is never edited in place; stack.sh copies it into a temp
+# dir before substituting. See README.md.
+#
+# Multi-instance note: three of this chart's subcharts (grafana, prometheus,
+# opentelemetry-collector) create cluster-scoped RBAC objects
+# (ClusterRole/ClusterRoleBinding) with fixed, non-release-scoped names by
+# default, which collide across two otel-demo helm releases in the same
+# cluster (confirmed live: a second `up gke` failed with "ClusterRole
+# grafana-clusterrole ... exists" against the pre-existing otel-demo
+# release). Each subchart's independent RBAC-naming knob is used below to
+# make these unique per $NS without touching the Service/Deployment names
+# those subcharts and other components reference by their stock, unqualified
+# name (e.g. `http://otel-collector:4318`, `http://prometheus:9090`):
+# grafana's sidecars only ever need to watch ConfigMaps in their own
+# namespace, so `grafana.rbac.namespaced: true` swaps its ClusterRole/
+# ClusterRoleBinding for a namespace-scoped Role/RoleBinding (no collision
+# possible, since those are namespaced objects); prometheus and
+# opentelemetry-collector both expose a dedicated override key for just the
+# ClusterRole/ClusterRoleBinding name
+# (`prometheus.server.clusterRoleNameOverride`,
+# `opentelemetry-collector.clusterRole.name` /
+# `.clusterRole.clusterRoleBinding.name`), so only that name is suffixed
+# with $NS.
+#
+# A second, separate collision showed up once RBAC was fixed: this chart's
+# opentelemetry-collector defaults to `mode: daemonset`, which schedules one
+# collector pod per node with hostPort bound for otlp/otlp-http/jaeger-*/
+# zipkin. hostPort is a node-level claim, not namespace-scoped, so a second
+# release's daemonset pods went Pending ("didn't have free ports") on any
+# node already running the pre-existing otel-demo release's collector
+# daemonset. Worse, even after nulling hostPort out, daemonset pods are
+# pinned (via per-pod nodeAffinity to an exact, already-existing node name)
+# to every node in the cluster, so NAP cannot add capacity for them the way
+# it does for ordinary Deployments: on this cluster's e2-standard-2 nodes,
+# several were already at 92-99% cpu/memory request from the pre-existing
+# otel-demo release's own daemonset pods plus both releases' regular
+# components, leaving no room for a second 100m/400Mi daemonset pod on
+# those specific nodes, and no amount of waiting fixes a pod that can only
+# ever be satisfied by a specific already-full node.
+#
+# Fixed by setting `opentelemetry-collector.mode: deployment` below: this
+# stack doesn't need per-node collection anyway (no component sends
+# telemetry via hostPort; everything reaches the collector through the
+# ClusterIP Service via $(OTEL_COLLECTOR_NAME), and config.receivers below
+# only defines otlp). A single Deployment pod schedules like any other
+# demo component, so NAP handles it exactly like it handles the other ~24.
+# Deviation to be aware of: the hostMetrics/kubeletMetrics/clusterMetrics
+# presets (enabled by default further down) still work in Deployment mode,
+# but only observe the one node the pod happens to land on, not the whole
+# cluster, since there's no longer a pod on every node. The
+# ports.*.hostPort nulling below is kept as a harmless no-op safety net in
+# case mode ever reverts to daemonset (isAgent, and therefore hostPort
+# rendering, is only true in that mode).
+#
+# Every component's podLabels below adds the two living-stack labels
+# (living-stack=$SYSTEM, living-stack-component=storefront) to that
+# component's pod template without touching its Deployment/StatefulSet
+# selector, using each (sub)chart's own supported labeling mechanism:
+# `components.<name>.podLabels` for the demo's own components (chart's
+# `templates/_objects.tpl`), `jaeger.jaeger.podLabels`,
+# `prometheus.server.podLabels`, `grafana.podLabels`, and
+# `opentelemetry-collector.podLabels` for those subcharts, and
+# `opensearch.labels` (opensearch's subchart has no separate podLabels key;
+# `labels` is merged into both the StatefulSet's own metadata and its pod
+# template via the `opensearch.labels` helper, and is never included in
+# `opensearch.selectorLabels`, so it does not touch the selector either).
+
+# The order flow (checkout -> orders topic -> accounting/fraud-detection)
+# runs on the shared streaming/ Strimzi Kafka bus instead of the chart's
+# bundled single-node kafka. See README.md for the full story. This uses
+# the chart's supported `envOverrides` upsert mechanism
+# (templates/_pod.tpl, otel-demo.envOverriden) so only KAFKA_ADDR and
+# KAFKA_TOPIC are touched per component, rather than reproducing each
+# component's whole `env` list. The `wait-for-kafka` initContainers
+# hardcode the kafka hostname/port in their nc command (not templated off
+# KAFKA_ADDR), so those are overridden too, wholesale, to point at
+# ${kafka_host}/${kafka_port}.
+components:
+  kafka:
+    # Bundled single-node kafka disabled; no resources block needed since
+    # this component no longer deploys.
+    enabled: false
+  accounting:
+    envOverrides:
+      - name: KAFKA_ADDR
+        value: ${kafka_bootstrap}
+      - name: KAFKA_TOPIC
+        value: ${kafka_topic}
+    initContainers:
+      - name: wait-for-kafka
+        image: busybox:latest
+        command: ["sh", "-c", "until nc -z -v -w30 ${kafka_host} ${kafka_port}; do echo waiting for kafka; sleep 2; done;"]
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 160Mi
+  ad:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 400Mi
+      limits:
+        memory: 600Mi
+  agent:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 500Mi
+  astronomy-db:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+  cart:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 160Mi
+  chatbot:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 500Mi
+  checkout:
+    envOverrides:
+      - name: KAFKA_ADDR
+        value: ${kafka_bootstrap}
+      - name: KAFKA_TOPIC
+        value: ${kafka_topic}
+    initContainers:
+      - name: wait-for-kafka
+        image: busybox:latest
+        command: ["sh", "-c", "until nc -z -v -w30 ${kafka_host} ${kafka_port}; do echo waiting for kafka; sleep 2; done;"]
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 20Mi
+  currency:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 20Mi
+  email:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 100Mi
+  flagd:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 75Mi
+  fraud-detection:
+    envOverrides:
+      - name: KAFKA_ADDR
+        value: ${kafka_bootstrap}
+      - name: KAFKA_TOPIC
+        value: ${kafka_topic}
+    initContainers:
+      - name: wait-for-kafka
+        image: busybox:latest
+        command: ["sh", "-c", "until nc -z -v -w30 ${kafka_host} ${kafka_port}; do echo waiting for kafka; sleep 2; done;"]
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 400Mi
+      limits:
+        memory: 600Mi
+  frontend:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 100m
+        memory: 250Mi
+  frontend-proxy:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 90Mi
+  image-provider:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 50Mi
+  load-generator:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+  mcp:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 500Mi
+  opamp-server:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 65Mi
+  payment:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 140Mi
+  product-catalog:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 25m
+        memory: 20Mi
+  quote:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 40Mi
+  recommendation:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 50m
+        memory: 500Mi
+  shipping:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 20Mi
+  telemetry-docs:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 100Mi
+  valkey-cart:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 10m
+        memory: 20Mi
+
+opentelemetry-collector:
+  # Only the cluster-scoped RBAC object names are made unique per $NS; the
+  # Service/Deployment stay named "otel-collector" (referenced elsewhere via
+  # the $(OTEL_COLLECTOR_NAME) env var and a few hardcoded endpoints). See
+  # the multi-instance note above.
+  clusterRole:
+    name: otel-collector-${namespace}
+    clusterRoleBinding:
+      name: otel-collector-${namespace}
+  # See the multi-instance note above: mode: deployment avoids the
+  # daemonset-per-node scheduling/resource problem entirely for this
+  # stack, which never needs hostPort-based collection.
+  mode: deployment
+  # Belt-and-suspenders: harmless no-op in deployment mode (isAgent is only
+  # true for the daemonset template), kept in case mode ever reverts to
+  # daemonset.
+  ports:
+    otlp:
+      hostPort: null
+    otlp-http:
+      hostPort: null
+    jaeger-compact:
+      hostPort: null
+    jaeger-thrift:
+      hostPort: null
+    jaeger-grpc:
+      hostPort: null
+    zipkin:
+      hostPort: null
+  podLabels:
+    living-stack: ${system}
+    living-stack-component: storefront
+  resources:
+    requests:
+      cpu: 100m
+      memory: 400Mi
+
+jaeger:
+  jaeger:
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 100m
+        memory: 600Mi
+
+prometheus:
+  server:
+    # Only the cluster-scoped ClusterRole/ClusterRoleBinding name is made
+    # unique per $NS; the Service/Deployment stay named "prometheus" (its
+    # stock fullnameOverride, referenced elsewhere e.g. by grafana's
+    # datasource config). See the multi-instance note above.
+    clusterRoleNameOverride: prometheus-${namespace}
+    # Chart's stock 400Mi memory limit OOMKilled this container repeatedly
+    # in practice (observed working set ~343Mi immediately before an
+    # OOMKill, so 400Mi left almost no headroom). Raised to 800Mi (limit
+    # and request) for real headroom. 800Mi still proved insufficient
+    # under actual sustained load in this environment (143 restarts,
+    # repeated OOMKills, working set exceeding the limit during WAL
+    # segment loading), so raised again to 1Gi (limit and request).
+    podLabels:
+      living-stack: ${system}
+      living-stack-component: storefront
+    resources:
+      requests:
+        cpu: 100m
+        memory: 1Gi
+      limits:
+        memory: 1Gi
+
+grafana:
+  # Sidecars only ever need to watch ConfigMaps in their own namespace, so
+  # this swaps the ClusterRole/ClusterRoleBinding for a namespace-scoped
+  # Role/RoleBinding, which needs no cross-release-unique name. See the
+  # multi-instance note above.
+  rbac:
+    namespaced: true
+  podLabels:
+    living-stack: ${system}
+    living-stack-component: storefront
+  resources:
+    requests:
+      cpu: 50m
+      memory: 300Mi
+  sidecar:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 256Mi
+
+opensearch:
+  labels:
+    living-stack: ${system}
+    living-stack-component: storefront
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1100Mi

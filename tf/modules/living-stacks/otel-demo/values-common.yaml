@@ -1,0 +1,46 @@
+# Shared settings for the opentelemetry-demo chart.
+#
+# Chart: open-telemetry/opentelemetry-demo
+# Pinned version: 0.41.0 (appVersion 3.0.0)
+# Repo: https://open-telemetry.github.io/opentelemetry-helm-charts
+#
+# This file holds settings that are not lane-specific. Only one lane
+# (GKE) exists today; see README.md for why the demo is not deployed
+# to the shared kind cluster.
+
+components:
+  # Bump the load generator's default virtual-user count above the
+  # chart's stock value of 5. Override at deploy time with
+  # LOAD_GEN_VUS=<n> ./stack.sh up gke (see stack.sh). The full env
+  # list has to be reproduced here because Helm replaces list values
+  # wholesale rather than merging them entry by entry.
+  load-generator:
+    env:
+      - name: LOAD_GENERATOR_VUS
+        value: "10"
+      - name: K6_TARGET_URL
+        value: http://frontend-proxy:8080
+      - name: K6_BROWSER_ENABLED
+        value: "true"
+      - name: K6_BROWSER_ARGS
+        value: no-sandbox,disable-dev-shm-usage
+      - name: FLAGD_HOST
+        value: flagd
+      - name: FLAGD_PORT
+        value: "8013"
+      - name: FLAGD_OFREP_PORT
+        value: "8016"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://$(OTEL_COLLECTOR_NAME):4318
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: http/protobuf
+      - name: K6_OTEL_EXPORTER_PROTOCOL
+        value: http/protobuf
+      - name: K6_OTEL_HTTP_EXPORTER_ENDPOINT
+        value: $(OTEL_COLLECTOR_NAME):4318
+      - name: K6_OTEL_HTTP_EXPORTER_INSECURE
+        value: "true"
+      - name: K6_OTEL_METRIC_PREFIX
+        value: k6.
+      - name: OTEL_RESOURCE_ATTRIBUTES_EXTRA
+        value: service.criticality=low
