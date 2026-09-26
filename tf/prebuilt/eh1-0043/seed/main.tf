@@ -244,13 +244,16 @@ locals {
       --from-file=alerting_rules.yml=/tmp/alerting_rules.yml \
       --dry-run=client -o yaml | kubectl -n storefront patch configmap prometheus --patch-file /dev/stdin
 
+    kubectl -n storefront rollout status deployment/checkout-metrics --timeout=120s
     kubectl -n storefront rollout restart deployment/prometheus
     kubectl -n storefront rollout status deployment/prometheus --timeout=180s
+    kubectl -n storefront rollout restart deployment/otel-collector
+    kubectl -n storefront rollout status deployment/otel-collector --timeout=180s
 
-    # Wait until Prometheus has scraped opentelemetry-collector (up == 1) and ingested at least 2 samples of checkout_requests_total
+    # Wait until Prometheus has scraped opentelemetry-collector (up == 1) and ingested multiple samples from both checkout scrape receivers
     for i in $(seq 1 60); do
       if kubectl -n storefront get pods -l app.kubernetes.io/name=opentelemetry-collector | grep -q "1/1"; then
-        sleep 12
+        sleep 25
         break
       fi
       sleep 2

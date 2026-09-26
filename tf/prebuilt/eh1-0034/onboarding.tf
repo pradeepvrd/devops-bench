@@ -278,10 +278,11 @@ resource "kubernetes_secret_v1" "auditor_script" {
           ) as conn:
               in_rec = bool(conn.execute("SELECT pg_is_in_recovery()").fetchone()[0])
               row = conn.execute(
-                  "SELECT failover, synced, active FROM pg_replication_slots WHERE slot_name = 'debezium'"
+                  "SELECT failover, synced, active, (NOT temporary AND restart_lsn IS NOT NULL AND confirmed_flush_lsn IS NOT NULL) "
+                  "FROM pg_replication_slots WHERE slot_name = 'debezium'"
               ).fetchone()
               if row:
-                  return in_rec, bool(row[0]), bool(row[1]), bool(row[2])
+                  return in_rec, bool(row[0]), bool(row[1] and row[3]), bool(row[2])
               return in_rec, False, False, False
 
       def main():

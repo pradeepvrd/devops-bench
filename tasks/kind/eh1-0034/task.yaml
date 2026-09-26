@@ -104,7 +104,7 @@ verification_spec:
       kind: deployment
       resource_name: debezium-server
       namespace: orders-db
-      path: status.availableReplicas
+      path: spec.replicas
       op: gte
       value: 1
     - type: resource_property
@@ -115,14 +115,21 @@ verification_spec:
       op: gte
       value: 1
   title: Debezium server and PostgreSQL cluster remain available
-  description: Deployment debezium-server and Cluster shop in orders-db maintain available instances throughout
-    the run.
+  description: Deployment debezium-server remains scaled up and Cluster shop in orders-db maintains ready
+    instances throughout the run.
 - name: continuity-verified
   role: objective
   mode: converge
   check:
     type: all
     checks:
+    - type: resource_property
+      kind: deployment
+      resource_name: debezium-server
+      namespace: orders-db
+      path: status.availableReplicas
+      op: gte
+      value: 1
     - type: resource_property
       kind: cluster.postgresql.cnpg.io
       resource_name: shop
