@@ -396,10 +396,10 @@ def test_probe_host_header_added_when_set(mocker: MockerFixture) -> None:
     )
     result = v.verify(0)
     assert result.success is True
-    curl_cmd = run_pod.call_args.args[2]
-    assert "-H" in curl_cmd
-    assert curl_cmd[curl_cmd.index("-H") + 1] == "Host: app.example.com"
-    assert curl_cmd[-1] == "http://1.2.3.4"
+    shell_cmd = run_pod.call_args.args[2]
+    assert shell_cmd[:2] == ["sh", "-c"]
+    assert "-H 'Host: app.example.com'" in shell_cmd[2]
+    assert "http://1.2.3.4" in shell_cmd[2]
 
 
 def test_probe_no_host_header_when_unset(mocker: MockerFixture) -> None:
@@ -407,13 +407,10 @@ def test_probe_no_host_header_when_unset(mocker: MockerFixture) -> None:
     v = HttpProbeVerifier.model_validate({"type": "http_probe", "url": "http://svc"})
     result = v.verify(0)
     assert result.success is True
-    curl_cmd = run_pod.call_args.args[2]
-    assert "-H" not in curl_cmd
-    assert curl_cmd == [
-        "curl",
-        "-s",
-        "-w",
-        "\n" + _HTTP_STATUS_MARKER + "%{http_code}",
-        "--max-time=10",
-        "http://svc",
+    shell_cmd = run_pod.call_args.args[2]
+    assert "-H" not in shell_cmd[2]
+    assert shell_cmd == [
+        "sh",
+        "-c",
+        f"sleep 2; curl -s -w '\n{_HTTP_STATUS_MARKER}%{{http_code}}' --max-time=10 http://svc; rc=$?; sleep 1; exit $rc",
     ]

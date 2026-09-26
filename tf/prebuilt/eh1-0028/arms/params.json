@@ -1,0 +1,20 @@
+{
+  "namespace": "orders-db",
+  "streaming_namespace": "streaming",
+  "verifier_namespace": "cdc-verifier",
+  "records_namespace": "maintenance-records",
+  "image": "ghcr.io/cloudnative-pg/postgresql:18.6",
+  "kafka_image": "quay.io/strimzi/kafka:1.2.0-kafka-4.3.1",
+  "slot_name": "debezium",
+  "batch_size": 60,
+  "batch_status": "reconciled",
+  "settle_sec": 20,
+  "kafka_bootstrap": "kafka-kafka-bootstrap.streaming.svc:9092",
+  "flink_rest": "http://streaming-flink-rest.streaming.svc:8081",
+  "enriched_topic": "orders.enriched",
+  "orders_topic": "cdc.public.orders",
+  "session_job": "enrichment-orders",
+  "offsets_topic": "cdc-offsets",
+  "min_batch": 60,
+  "lag_margin_sec": 60
+}

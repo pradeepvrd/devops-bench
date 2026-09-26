@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import time
 import uuid
 from typing import Any, Literal
@@ -249,10 +250,15 @@ class HttpProbeVerifier(BaseVerifier):
         # ambient current-context is a mutable global any run can rewrite, and
         # an in-cluster probe pod has to launch against the cluster under
         # test, not whichever one happens to be ambient.
+        shell_cmd = [
+            "sh",
+            "-c",
+            f"sleep 2; {shlex.join(curl_cmd)}; rc=$?; sleep 1; exit $rc",
+        ]
         output = run_pod(
             pod_name,
             "curlimages/curl",
-            curl_cmd,
+            shell_cmd,
             namespace=self.namespace,
             kubeconfig=self.kubeconfig,
             context=self.context,

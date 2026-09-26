@@ -1,0 +1,18 @@
+{
+  "base_ops_per_sec": 2,
+  "day_length_minutes": 120,
+  "diurnal_amplitude": 0.4,
+  "op_mix": {
+    "insert_order": 0.35,
+    "update_order_status": 0.35,
+    "update_stock": 0.15,
+    "new_customer": 0.1,
+    "update_customer": 0.05,
+    "delete_stale_order": 0.05
+  },
+  "hot_customer_zipf_alpha": 1.1,
+  "batch_burst": {
+    "prob_per_minute": 0.02,
+    "size": 15
+  }
+}

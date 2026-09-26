@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pipeline-response
+  namespace: ${namespace}
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: pipeline-response
+      volumes:
+        - name: program
+          configMap:
+            name: pipeline-response-program
+            # 493 is 0755. Written in decimal on purpose: this file is read by
+            # yamldecode and re-emitted by yamlencode, and 0755 survives that
+            # round trip as the integer 755, which the API rejects as out of
+            # octal range.
+            defaultMode: 493
+      containers:
+        - name: respond
+          image: ${image}
+          command: ["bash", "/program/respond.sh"]
+          volumeMounts:
+            - name: program
+              mountPath: /program
+          env:
+            - name: PGHOST
+              value: "shop-rw.${namespace}.svc"
+            - name: PGDATABASE
+              value: "shop"
+            - name: PGUSER
+              value: "postgres"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: shop-superuser
+                  key: password
+            - name: SLOT_NAME
+              value: "${slot_name}"
+            - name: BATCH_STATUS
+              value: "${batch_status}"
+            - name: STREAMING_NAMESPACE
+              value: "${streaming_namespace}"
+            - name: SESSION_JOB
+              value: "${session_job}"
+            - name: FLINK_REST
+              value: "${flink_rest}"
+            - name: SETTLE_SEC
+              value: "${settle_sec}"
